@@ -65,30 +65,27 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-/* metrics */
-[data-testid="stMetricValue"] { font-size:1.3rem; font-weight:700; }
-[data-testid="stMetricLabel"] { font-size:.78rem; color:#aaa; }
-[data-testid="stMetricDelta"] { font-size:.82rem; }
-
-/* layout */
+[data-testid="stMetricValue"]  { font-size:1.2rem; font-weight:700; }
+[data-testid="stMetricLabel"]  { font-size:.75rem; color:#aaa; }
+[data-testid="stMetricDelta"]  { font-size:.78rem; }
 .block-container {
-    padding-top:.6rem !important;
-    padding-left:min(1.5rem,4vw) !important;
-    padding-right:min(1.5rem,4vw) !important;
+    padding-top:.5rem !important;
+    padding-left:max(.5rem,2vw) !important;
+    padding-right:max(.5rem,2vw) !important;
     max-width:1440px;
 }
-
-/* card style for expanders */
 [data-testid="stExpander"] { border:1px solid #2a3a4a !important; border-radius:8px !important; }
-
-/* tab labels */
-[data-testid="stTabs"] button p { font-size:.9rem; }
-
-@media(max-width:768px){
-    [data-testid="stMetricValue"] { font-size:1rem !important; }
-    h1 { font-size:1.25rem !important; }
-    h2,h3 { font-size:.95rem !important; }
-    [data-testid="stTabs"] button p { font-size:.72rem; }
+[data-testid="stTabs"] [role="tablist"] { flex-wrap:wrap !important; gap:2px !important; }
+[data-testid="stTabs"] button { min-width:0 !important; white-space:normal !important; text-align:center !important; }
+@media(max-width:640px){
+    [data-testid="stMetricValue"] { font-size:.88rem !important; }
+    [data-testid="stMetricLabel"] { font-size:.68rem !important; }
+    h1 { font-size:1.05rem !important; line-height:1.25 !important; }
+    h2,h3 { font-size:.88rem !important; }
+    [data-testid="stTabs"] button { font-size:.65rem !important; padding:.18rem .28rem !important; }
+    div[data-testid="column"] { min-width:100% !important; flex:1 1 100% !important; }
+    [data-testid="stMultiSelect"] { width:100% !important; }
+    .js-plotly-plot .plotly { min-width:0 !important; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -326,16 +323,32 @@ with sc1:
     use_custom_sal = st.toggle("Use my own salary", value=False, key="use_csal")
 with sc2:
     custom_sal_1 = st.number_input(
-        "My salary ($/mo)", 0, 50_000, 5_000, step=100, key="csal1",
+        "Person 1 net salary ($/mo)" if family == 2 else "Your net salary ($/mo)",
+        0, 500_000, 5_000, step=100, key="csal1",
         disabled=not use_custom_sal,
+        help="Your monthly take-home pay in USD after taxes",
     )
 with sc3:
     custom_sal_2 = st.number_input(
-        "Partner salary ($/mo)", 0, 50_000, 4_000, step=100, key="csal2",
+        "Person 2 net salary ($/mo)",
+        0, 500_000, 4_000, step=100, key="csal2",
         disabled=(not use_custom_sal or family == 1),
+        help="Partner monthly take-home pay in USD. Only used when Family = Couple.",
     )
 
 CUSTOM_SAL_TOTAL: float = float(custom_sal_1 + (custom_sal_2 if family == 2 else 0))
+CUSTOM_SAL_1: float = float(custom_sal_1)
+CUSTOM_SAL_2: float = float(custom_sal_2 if family == 2 else 0)
+
+if use_custom_sal:
+    if family == 2:
+        st.caption(
+            f"👤 Person 1: **${CUSTOM_SAL_1:,.0f}/mo**  +  "
+            f"👤 Person 2: **${CUSTOM_SAL_2:,.0f}/mo**  =  "
+            f"🏠 Combined: **${CUSTOM_SAL_TOTAL:,.0f}/mo**"
+        )
+    else:
+        st.caption(f"💰 Your salary: **${CUSTOM_SAL_TOTAL:,.0f}/mo**")
 
 with st.expander("Active CSV rows", expanded=False):
     st.caption(f"**Salary:** `{SAL_METRIC}`")
@@ -343,6 +356,21 @@ with st.expander("Active CSV rows", expanded=False):
     st.caption(f"**Saving:** `{SAV_METRIC.strip()}`")
     if use_custom_sal:
         st.caption(f"**Custom salary override:** ${CUSTOM_SAL_TOTAL:,.0f}/mo total")
+
+# ── Unforeseen / buffer expenses ──────────────────────────────────────────────
+st.markdown("#### 🆘 Unforeseen / Emergency Buffer")
+_unf_c1, _unf_c2 = st.columns([3, 1])
+with _unf_c1:
+    UNFORESEEN_PCT: float = float(st.slider(
+        "Reserve for unexpected expenses (% of net income)",
+        min_value=0, max_value=50, value=15, step=5,
+        help="Applied as a deduction from net saving in all calculations. 10-20% recommended.",
+        key="unforeseen_pct",
+    ))
+with _unf_c2:
+    st.metric("Reserved", f"{UNFORESEEN_PCT:.0f}%",
+              help="This % is deducted from your net monthly saving everywhere.")
+UNFORESEEN_FACTOR: float = 1.0 - UNFORESEEN_PCT / 100.0
 
 st.divider()
 
@@ -365,6 +393,7 @@ TABS = st.tabs([
     "🛂 Immigration",
     "📈 Savings Plan",
     "🏆 Final Score",
+    "🆚 Compare vs Minsk",
 ])
 
 
@@ -404,29 +433,61 @@ with TABS[0]:
 
     # ── radar
     st.markdown("### 🕸️ Multi-Dimension Radar")
-    R_M = ["Quality of life","Safety","Purch, power","Health care","Climate","Internet Speed (Mbps)"]
-    R_L = ["Quality of Life","Safety","Purch.Power","Healthcare","Climate","Internet"]
-    R_X = [250, 100, 200, 100, 100, 350]
+    R_M = [
+        "Quality of life","Safety","Purch, power","Health care",
+        "Climate","Internet Speed (Mbps)","Pollution",
+    ]
+    R_L = [
+        "Quality of Life","Safety","Purch. Power","Healthcare",
+        "Climate","Internet Mbps","Clean Air ↑",
+    ]
+    R_X   = [250, 100, 200, 100, 100, 350, 100]
+    # For "Pollution" lower = better → invert
+    R_INV = [False, False, False, False, False, False, True]
+
     fig_r = go.Figure()
     for i, city in enumerate(selected):
-        vals = [v(row(m, selected), city) or 0 for m in R_M]
-        norm = [min(x / mx * 100, 100) for x, mx in zip(vals, R_X)]
+        norm = []
+        for m_, mx_, inv_ in zip(R_M, R_X, R_INV):
+            raw = v(row(m_, selected), city) or 0
+            pct_ = min(raw / mx_ * 100, 100)
+            norm.append(100 - pct_ if inv_ else pct_)
+
         fig_r.add_trace(go.Scatterpolar(
-            r=norm + [norm[0]], theta=R_L + [R_L[0]],
-            fill="toself", name=city,
-            line_color=COLORS[i % len(COLORS)],
-            opacity=0.85,
+            r=norm + [norm[0]],
+            theta=R_L + [R_L[0]],
+            fill="toself",
+            name=city,
+            line=dict(color=COLORS[i % len(COLORS)], width=2.5),
+            fillcolor=COLORS[i % len(COLORS)].replace(")", ",0.15)").replace("rgb","rgba")
+                        if "rgb" in COLORS[i % len(COLORS)] else COLORS[i % len(COLORS)],
+            opacity=0.9,
         ))
+
     fig_r.update_layout(
         polar=dict(
-            bgcolor="rgba(15,25,40,0.6)",
-            radialaxis=dict(visible=True, range=[0, 100], tickfont=dict(size=9)),
-            angularaxis=dict(tickfont=dict(size=11)),
+            bgcolor="rgba(10,20,35,0.7)",
+            radialaxis=dict(
+                visible=True, range=[0, 100],
+                tickvals=[25, 50, 75, 100],
+                ticktext=["25","50","75","100"],
+                tickfont=dict(size=9, color="#aaa"),
+                gridcolor="rgba(255,255,255,.12)",
+                linecolor="rgba(255,255,255,.1)",
+            ),
+            angularaxis=dict(
+                tickfont=dict(size=12, color="#ddd"),
+                gridcolor="rgba(255,255,255,.08)",
+                linecolor="rgba(255,255,255,.12)",
+            ),
         ),
         paper_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", y=-0.12),
+        plot_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", y=-0.14, xanchor="center", x=0.5,
+                    font=dict(size=11)),
+        margin=dict(l=30, r=30, t=30, b=60),
     )
-    chart(fig_r, 520)
+    chart(fig_r, 560)
 
     # ── quick comparison table  (no background_gradient — uses bar instead)
     st.markdown("### 📋 Quick Comparison")
@@ -447,12 +508,63 @@ with TABS[0]:
     q_df = pd.DataFrame(
         {lbl: row(m, selected) for lbl, m in q_meta.items()},
         index=selected,
-    ).T.round(1)
-    # bar-based colouring — no matplotlib required
-    s = q_df.style
-    for col in q_df.columns:
-        s = s.bar(subset=[col], color=["#c0392b", "#27ae60"], align="mid")
-    st.dataframe(s, use_container_width=True)
+    ).T
+    # Format: $ for money rows, 0 decimals for indices
+    money_rows = ["Salary ($/mo)", "Base Exp 1p ($/mo)", "Net Save/mo", "Rent 1BR centre"]
+    fmt_map = {}
+    for r_name in q_df.index:
+        if r_name in money_rows:
+            fmt_map[r_name] = "${:,.0f}"
+        else:
+            fmt_map[r_name] = "{:.0f}"
+
+    # Build plotly heatmap — no matplotlib, clean formatting
+    import math
+    q_norm = q_df.copy().astype(float)
+    invert_rows = {"Crime Index", "Pollution"}  # lower = better
+    for idx_r in q_norm.index:
+        d = q_norm.loc[idx_r]; mn, mx = d.min(), d.max()
+        if mx > mn:
+            if idx_r in invert_rows:
+                q_norm.loc[idx_r] = 1 - (d - mn) / (mx - mn)
+            else:
+                q_norm.loc[idx_r] = (d - mn) / (mx - mn)
+        else:
+            q_norm.loc[idx_r] = 0.5
+
+    # text labels with proper formatting
+    text_q = []
+    for r_name in q_df.index:
+        row_txt = []
+        fmt_str = fmt_map.get(r_name, "{:.0f}")
+        for c_name in q_df.columns:
+            val_ = q_df.loc[r_name, c_name]
+            if pd.notna(val_) and not math.isnan(float(val_)):
+                try:
+                    row_txt.append(fmt_str.format(float(val_)))
+                except Exception:
+                    row_txt.append(f"{val_:.0f}")
+            else:
+                row_txt.append("—")
+        text_q.append(row_txt)
+
+    fig_qhm = go.Figure(go.Heatmap(
+        z=q_norm.values,
+        x=list(q_df.columns),
+        y=list(q_df.index),
+        text=text_q,
+        texttemplate="%{text}",
+        colorscale="RdYlGn",
+        showscale=False,
+    ))
+    fig_qhm.update_layout(
+        height=max(300, len(q_df) * 36 + 60),
+        margin=dict(l=130, r=4, t=30, b=8),
+        yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
+        xaxis=dict(side="top", tickangle=-30),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(fig_qhm, use_container_width=True, config=PLOTLY_CFG)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -527,25 +639,34 @@ with TABS[1]:
             })
         sav_long = pd.concat([sav_long, pd.DataFrame(csal_rows)], ignore_index=True)
 
+    # apply UNFORESEEN_FACTOR to all saving values
+    sav_long["USD/mo"] = sav_long["USD/mo"] * UNFORESEEN_FACTOR
+
+    n_scenarios = sav_long["Scenario"].nunique()
+    n_cities    = len(selected)
+    bar_h = max(420, 60 + n_cities * n_scenarios * 22)
+
     fig_sav = px.bar(
         sav_long, x="City", y="USD/mo", color="Scenario", barmode="group",
-        title="Net monthly savings — all scenarios (USD/mo)",
-        color_discrete_sequence=px.colors.qualitative.Set2 + ["#f9ca24"],
+        title=f"Net monthly savings — all scenarios × {100-UNFORESEEN_PCT:.0f}% kept (USD/mo)",
+        color_discrete_sequence=COLORS[:n_scenarios],
         category_orders={"Scenario": list(SAV_SC.keys()) + (["★ Your Salary"] if use_custom_sal else [])},
     )
     fig_sav.add_hline(y=0, line_dash="dash", line_color="#e74c3c", opacity=.7)
     fig_sav.update_layout(
         yaxis_tickformat="$,.0f",
-        legend=dict(orientation="h", yanchor="top", y=-0.28,
+        height=bar_h,
+        legend=dict(orientation="h", yanchor="top", y=-0.22,
                     xanchor="left", x=0, font=dict(size=10)),
-        margin=dict(l=6, r=6, t=46, b=150),
-        bargap=0.10, bargroupgap=0.04,
+        margin=dict(l=6, r=6, t=46, b=max(130, n_scenarios * 18)),
+        bargap=0.08, bargroupgap=0.04,
         xaxis=dict(tickangle=-35, automargin=True),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
     )
     st.plotly_chart(fig_sav, use_container_width=True, config=PLOTLY_CFG)
 
     active_lbl = next((k for k, m in SAV_SC.items() if m == SAV_METRIC), SAV_METRIC.strip())
-    st.caption(f"Active profile: **{active_lbl}**")
+    st.caption(f"▶ Active profile: **{active_lbl}** · Unforeseen deduction: **{UNFORESEEN_PCT:.0f}%**")
 
     # ── purchasing power + tax
     st.markdown("### 💪 Purchasing Power & Tax")
@@ -635,7 +756,21 @@ with TABS[2]:
     # ── mortgage calculator
     st.markdown("### 🏦 Mortgage Calculator (80 m², 20% down, 20-year fixed)")
     sal_ser  = row(SAL_METRIC, selected)
-    eff_sal  = {c: (CUSTOM_SAL_TOTAL if use_custom_sal else v(sal_ser, c)) for c in selected}
+    eff_sal_m = {c: (CUSTOM_SAL_TOTAL if use_custom_sal else v(sal_ser, c)) for c in selected}
+    sav_ser_m = row(SAV_METRIC, selected)
+    exp_ser_m = row(EXP_METRIC, selected)
+
+    # effective monthly NET saving (after unforeseen %)
+    def eff_net_m(city_: str) -> float:
+        sl_ = eff_sal_m[city_]
+        ev_ = v(exp_ser_m, city_)
+        ns_ = v(sav_ser_m, city_)
+        if use_custom_sal and pd.notna(ev_):
+            ns_ = sl_ - ev_
+        elif np.isnan(ns_) and pd.notna(sl_) and pd.notna(ev_):
+            ns_ = sl_ - ev_
+        return float(ns_) * UNFORESEEN_FACTOR if pd.notna(ns_) else np.nan
+
     mort_rows_list = []
     for city in selected:
         price = v(buy_c, city); r_ann = v(rrate, city)
@@ -643,14 +778,16 @@ with TABS[2]:
             continue
         loan = price * .80; r_mo = r_ann / 100 / 12; n = 240
         pmt  = loan * r_mo * (1 + r_mo)**n / ((1 + r_mo)**n - 1) if r_mo > 0 else loan / n
-        sl   = eff_sal[city]
+        sl   = eff_sal_m[city]
+        net_ = eff_net_m(city)
         mort_rows_list.append({
-            "City"              : city,
-            "Price 80m²"        : price,
-            "Mortgage Rate %"   : r_ann,
-            "Monthly Payment"   : pmt,
-            "% of Salary"       : pmt / sl * 100 if sl and sl > 0 else np.nan,
-            "Full price (yrs)"  : price / (sl * 12) if sl and sl > 0 else np.nan,
+            "City"                 : city,
+            "Price 80m²"           : price,
+            "Mortgage Rate %"      : r_ann,
+            "Monthly Payment"      : pmt,
+            "% of Salary"          : pmt / sl * 100 if sl and sl > 0 else np.nan,
+            "% of Net Saving"      : pmt / net_ * 100 if pd.notna(net_) and net_ > 0 else np.nan,
+            "Full price (yrs net)" : price / (net_ * 12) if pd.notna(net_) and net_ > 0 else np.nan,
         })
     if mort_rows_list:
         mdf = pd.DataFrame(mort_rows_list).set_index("City")
@@ -658,28 +795,79 @@ with TABS[2]:
             mdf.style
                .format({"Price 80m²":"${:,.0f}", "Monthly Payment":"${:,.0f}",
                         "Mortgage Rate %":"{:.2f}%", "% of Salary":"{:.1f}%",
-                        "Full price (yrs)":"{:.1f}"})
-               .bar(subset=["% of Salary","Full price (yrs)"], color=["#27ae60","#c0392b"], align="left"),
+                        "% of Net Saving":"{:.1f}%", "Full price (yrs net)":"{:.1f}"}),
             use_container_width=True,
         )
-        fig_mort = px.bar(
-            mdf.reset_index(), x="City", y="Monthly Payment",
-            title="Mortgage Monthly Payment",
-            color="% of Salary", color_continuous_scale="RdYlGn_r",
-            labels={"Monthly Payment":"$/mo"},
-        )
-        chart(fig_mort, 360)
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            fig_mort = px.bar(
+                mdf.reset_index(), x="City", y="Monthly Payment",
+                title="Mortgage Monthly Payment ($/mo)",
+                color="% of Salary", color_continuous_scale="RdYlGn_r",
+            )
+            fig_mort.update_layout(coloraxis_showscale=False)
+            chart(fig_mort, 360)
+        with col_m2:
+            fig_mort2 = px.bar(
+                mdf.reset_index(), x="City", y="Full price (yrs net)",
+                title=f"Years of net saving to buy (after {UNFORESEEN_PCT:.0f}% reserved)",
+                color="Full price (yrs net)", color_continuous_scale="RdYlGn_r",
+                text=[f"{v_:.1f}y" if pd.notna(v_) else "—"
+                      for v_ in mdf["Full price (yrs net)"]],
+            )
+            fig_mort2.update_traces(textposition="outside")
+            fig_mort2.update_layout(showlegend=False, coloraxis_showscale=False)
+            chart(fig_mort2, 360)
 
-    st.markdown("### 📊 Property-to-Income Ratio (years of salary)")
-    fig_pti = px.bar(
-        x=selected, y=[v(pti,c) for c in selected],
-        title="Years of salary to buy 80m² (centre) — lower = more affordable",
-        color=[v(pti,c) for c in selected],
-        color_continuous_scale="RdYlGn_r",
-        labels={"x":"City","y":"Years"},
+    st.markdown("### 📊 Property-to-Savings Ratio (years to buy from net savings)")
+    sav_ser_h = row(SAV_METRIC, selected)
+    sal_ser_h = row(SAL_METRIC, selected)
+    exp_ser_h = row(EXP_METRIC, selected)
+
+    pts_vals, pts_labels = [], []
+    for c in selected:
+        price_c = v(buy_c, c)
+        sv_h = CUSTOM_SAL_TOTAL if use_custom_sal else v(sal_ser_h, c)
+        ev_h = v(exp_ser_h, c)
+        net_h = v(sav_ser_h, c)
+        if use_custom_sal and pd.notna(ev_h):
+            net_h = sv_h - ev_h
+        elif np.isnan(net_h) and pd.notna(sv_h) and pd.notna(ev_h):
+            net_h = sv_h - ev_h
+        # apply unforeseen deduction
+        net_h_uf = float(net_h) * UNFORESEEN_FACTOR if pd.notna(net_h) and not np.isnan(net_h) else np.nan
+        annual_saving = net_h_uf * 12 if pd.notna(net_h_uf) and not np.isnan(net_h_uf) else np.nan
+        yrs = price_c / annual_saving if (
+            pd.notna(price_c) and pd.notna(annual_saving) and annual_saving > 0
+        ) else np.nan
+        pts_vals.append(yrs)
+        pts_labels.append(f"{yrs:.1f}y" if pd.notna(yrs) and not np.isnan(yrs) else "—")
+
+    col_pti1, col_pti2 = st.columns(2)
+    with col_pti1:
+        fig_pti = px.bar(
+            x=selected, y=pts_vals,
+            title=f"Years of net savings to buy 80m² ({100-UNFORESEEN_PCT:.0f}% kept)",
+            color=pts_vals, color_continuous_scale="RdYlGn_r",
+            text=pts_labels,
+        )
+        fig_pti.update_traces(textposition="outside")
+        fig_pti.update_layout(showlegend=False, coloraxis_showscale=False)
+        chart(fig_pti, 380)
+    with col_pti2:
+        fig_pti2 = px.bar(
+            x=selected, y=[v(pti,c) for c in selected],
+            title="CSV Property-to-Income (years of avg salary, reference)",
+            color=[v(pti,c) for c in selected], color_continuous_scale="RdYlGn_r",
+            text=[f"{v(pti,c):.1f}y" if pd.notna(v(pti,c)) else "—" for c in selected],
+        )
+        fig_pti2.update_traces(textposition="outside")
+        fig_pti2.update_layout(showlegend=False, coloraxis_showscale=False)
+        chart(fig_pti2, 380)
+    st.caption(
+        f"Left: years of **net saving after {UNFORESEEN_PCT:.0f}% unforeseen reserve** to buy 80m² (centre).  "
+        "Right: CSV benchmark (years of average local salary)."
     )
-    fig_pti.update_layout(showlegend=False, coloraxis_showscale=False)
-    chart(fig_pti, 360)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -904,72 +1092,276 @@ with TABS[4]:
 # 5 · IMMIGRATION
 # ══════════════════════════════════════════════════════════════════════════════
 with TABS[5]:
-    st.subheader("🛂 Immigration & Residency")
+    st.subheader("🛂 Immigration, Residency & Passport Pathways")
 
-    IMM_M: Dict[str, str] = {
-        "PR Fast (yrs)"     : "PR (Years) Fast Track",
-        "PR General (yrs)"  : "PR (Years) General Path",
-        "Citizen Fast (yrs)": "Citizenship (Years) Fast",
-        "Citizen Real (yrs)": "Citizenship (Years) Real",
-        "Passport Diff."    : "BY Passport Difficulty",
-        "IELTS"             : "IELTS / Language",
-        "1yr Buffer ($k)"   : "1 Year Buffer (USD), $k",
-        "Salary 4-5y ($k)"  : "Salary (4-5y exp), $k",
-    }
-    imm_df = pd.DataFrame({k: row(m, selected) for k, m in IMM_M.items()}, index=selected)
+    # ── raw data rows
+    pr_fast  = row("PR (Years) Fast Track",    selected)
+    pr_gen   = row("PR (Years) General Path",  selected)
+    cit_fast = row("Citizenship (Years) Fast", selected)
+    cit_real = row("Citizenship (Years) Real", selected)
+    pass_d   = row("BY Passport Difficulty",   selected)
+    ielts    = row("IELTS / Language",         selected)
+    buf_rr   = row("1 Year Buffer (USD), $k",  selected) * 1000
+    sal_exp  = row("Salary (4-5y exp), $k",    selected)
 
-    fig_ihm = px.imshow(imm_df.T, color_continuous_scale="RdYlGn_r",
-                        title="Immigration Metrics Heatmap", aspect="auto", text_auto=".1f")
-    fig_ihm.update_coloraxes(showscale=False)
-    chart(fig_ihm, 400)
+    # ── 4 total journey combos:
+    # PR Fast  + Citizenship Fast  → "Best case" (shortest total)
+    # PR Fast  + Citizenship Real  → "Realistic fast PR"
+    # PR Gen   + Citizenship Fast  → "General PR, fast citizen"
+    # PR Gen   + Citizenship Real  → "Worst case" (longest total)
 
-    st.markdown("### ⏱️ Residency Timeline (years)")
-    fig_tl = go.Figure()
-    for lbl, m, clr in [
-        ("PR Fast",     "PR (Years) Fast Track",    "#27ae60"),
-        ("PR General",  "PR (Years) General Path",  "#f39c12"),
-        ("Citizen Fast","Citizenship (Years) Fast",  "#3498db"),
-        ("Citizen Real","Citizenship (Years) Real",  "#e74c3c"),
-    ]:
-        rr = row(m, selected)
-        fig_tl.add_bar(x=selected, y=[v(rr,c) for c in selected],
-                       name=lbl, marker_color=clr)
-    fig_tl.update_layout(barmode="group", title="Years to PR / Citizenship")
-    chart(fig_tl, 420)
+    st.markdown("### 🗺️ Full Pathway: Residency → Passport")
+    st.caption(
+        "Each bar shows the **total years from arrival to passport**.  "
+        "The coloured segments show the two stages: "
+        "🟦 Residency (PR) and 🟧 Citizenship on top of PR."
+    )
 
-    st.markdown("### 🛡️ Buffer Required vs Your Savings")
-    buf_r = row("1 Year Buffer (USD), $k", selected) * 1000
+    path_data: List[Dict] = []
+    for city in selected:
+        prf  = v(pr_fast,  city)
+        prg  = v(pr_gen,   city)
+        cf   = v(cit_fast, city)
+        cr   = v(cit_real, city)
+        # Citizenship years in CSV = years AFTER getting PR (incremental)
+        for combo, pr_yrs, cit_yrs, label, colour_pr, colour_cit in [
+            ("🟢 Best case",          prf, cf, "PR Fast + Citizen Fast",   "#27ae60", "#00b894"),
+            ("🟡 Fast PR · slow cit", prf, cr, "PR Fast + Citizen Real",   "#f39c12", "#fdcb6e"),
+            ("🟠 Slow PR · fast cit", prg, cf, "PR General + Citizen Fast","#e17055", "#fab1a0"),
+            ("🔴 Worst case",         prg, cr, "PR General + Citizen Real","#d63031", "#ff7675"),
+        ]:
+            if pd.notna(pr_yrs) and pd.notna(cit_yrs):
+                path_data.append({
+                    "City":      city,
+                    "Scenario":  combo,
+                    "Label":     label,
+                    "PR Stage":  pr_yrs,
+                    "Citizenship Stage": cit_yrs,
+                    "Total":     pr_yrs + cit_yrs,
+                    "colour_pr": colour_pr,
+                    "colour_cit":colour_cit,
+                })
+
+    if path_data:
+        path_df = pd.DataFrame(path_data)
+
+        # ── Stacked horizontal bar — one group per city, 4 scenarios
+        fig_path = go.Figure()
+
+        scenarios = ["🟢 Best case","🟡 Fast PR · slow cit",
+                     "🟠 Slow PR · fast cit","🔴 Worst case"]
+        pr_colors  = ["#27ae60","#f39c12","#e17055","#d63031"]
+        cit_colors = ["#00b894","#fdcb6e","#fab1a0","#ff7675"]
+
+        for sc, pc, cc in zip(scenarios, pr_colors, cit_colors):
+            sub = path_df[path_df["Scenario"] == sc]
+            if sub.empty:
+                continue
+            fig_path.add_bar(
+                name=f"PR — {sc}",
+                x=sub["PR Stage"],
+                y=[f"{r['City']} | {r['Scenario']}" for _, r in sub.iterrows()],
+                orientation="h",
+                marker_color=pc,
+                text=[f"PR: {r['PR Stage']:.0f}y" for _, r in sub.iterrows()],
+                textposition="inside",
+                legendgroup=sc,
+                hovertemplate="<b>%{y}</b><br>PR stage: %{x:.1f} yrs<extra></extra>",
+            )
+            fig_path.add_bar(
+                name=f"Passport — {sc}",
+                x=sub["Citizenship Stage"],
+                y=[f"{r['City']} | {r['Scenario']}" for _, r in sub.iterrows()],
+                orientation="h",
+                marker_color=cc,
+                text=[f"+{r['Citizenship Stage']:.0f}y → 🛂{r['Total']:.0f}y total"
+                      for _, r in sub.iterrows()],
+                textposition="inside",
+                legendgroup=sc,
+                hovertemplate="<b>%{y}</b><br>Citizenship: +%{x:.1f} yrs<extra></extra>",
+            )
+
+        fig_path.update_layout(
+            barmode="stack",
+            title="Years from Arrival → Residency (PR) → Passport",
+            xaxis_title="Years",
+            height=max(420, len(selected) * 4 * 32 + 80),
+            legend=dict(orientation="h", y=-0.18, xanchor="left", x=0, font_size=10),
+            margin=dict(l=4, r=4, t=48, b=120),
+            xaxis=dict(gridcolor="rgba(255,255,255,.1)"),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig_path, use_container_width=True, config=PLOTLY_CFG)
+
+    # ── Grouped bar: compare best vs worst per city
+    st.markdown("### ⚡ Best vs Worst Case Total (years to passport)")
+    best_tot  = [v(pr_fast, c) + v(cit_fast, c)
+                 if pd.notna(v(pr_fast, c)) and pd.notna(v(cit_fast, c)) else np.nan
+                 for c in selected]
+    worst_tot = [v(pr_gen, c) + v(cit_real, c)
+                 if pd.notna(v(pr_gen, c)) and pd.notna(v(cit_real, c)) else np.nan
+                 for c in selected]
+
+    fig_bw = go.Figure()
+    fig_bw.add_bar(x=selected, y=best_tot,  name="🟢 Best (PR fast + Citizen fast)",
+                   marker_color="#27ae60",
+                   text=[f"{t:.0f}y" if pd.notna(t) else "—" for t in best_tot],
+                   textposition="outside")
+    fig_bw.add_bar(x=selected, y=worst_tot, name="🔴 Worst (PR general + Citizen real)",
+                   marker_color="#d63031",
+                   text=[f"{t:.0f}y" if pd.notna(t) else "—" for t in worst_tot],
+                   textposition="outside")
+    fig_bw.update_layout(
+        barmode="group",
+        title="Total Years to Passport: Best vs Worst Scenario",
+        yaxis_title="Years from arrival",
+    )
+    chart(fig_bw, 420)
+
+    # ── PR only chart
+    st.markdown("### 🏠 Residency (PR) Timeline")
+    col1, col2 = st.columns(2)
+    with col1:
+        fig_pr = go.Figure()
+        fig_pr.add_bar(x=selected, y=[v(pr_fast,c) for c in selected],
+                       name="PR Fast Track",   marker_color="#27ae60",
+                       text=[f"{v(pr_fast,c):.0f}y" if pd.notna(v(pr_fast,c)) else "—"
+                             for c in selected], textposition="outside")
+        fig_pr.add_bar(x=selected, y=[v(pr_gen,c) for c in selected],
+                       name="PR General Path", marker_color="#f39c12",
+                       text=[f"{v(pr_gen,c):.0f}y" if pd.notna(v(pr_gen,c)) else "—"
+                             for c in selected], textposition="outside")
+        fig_pr.update_layout(barmode="group", title="Years to Permanent Residency")
+        chart(fig_pr, 380)
+    with col2:
+        # Difficulty index for BY passport holders
+        fig_pd = px.bar(x=selected, y=[v(pass_d,c) for c in selected],
+                        title="BY Passport Difficulty (higher = harder to immigrate)",
+                        color=[v(pass_d,c) for c in selected],
+                        color_continuous_scale="RdYlGn_r",
+                        text=[f"{v(pass_d,c):.1f}" if pd.notna(v(pass_d,c)) else "—"
+                              for c in selected])
+        fig_pd.update_traces(textposition="outside")
+        fig_pd.update_layout(showlegend=False, coloraxis_showscale=False)
+        chart(fig_pd, 380)
+
+    # ── Citizenship chart
+    st.markdown("### 🛂 Citizenship Timeline (years AFTER getting PR)")
+    fig_cit = go.Figure()
+    fig_cit.add_bar(x=selected, y=[v(cit_fast,c) for c in selected],
+                    name="Citizenship Fast",   marker_color="#3498db",
+                    text=[f"+{v(cit_fast,c):.0f}y" if pd.notna(v(cit_fast,c)) else "—"
+                          for c in selected], textposition="outside")
+    fig_cit.add_bar(x=selected, y=[v(cit_real,c) for c in selected],
+                    name="Citizenship Real",   marker_color="#8e44ad",
+                    text=[f"+{v(cit_real,c):.0f}y" if pd.notna(v(cit_real,c)) else "—"
+                          for c in selected], textposition="outside")
+    fig_cit.update_layout(
+        barmode="group",
+        title="Additional Years for Citizenship (on top of PR)",
+        yaxis_title="Years after PR",
+    )
+    chart(fig_cit, 400)
+
+    # ── Summary bubble: total range per city
+    st.markdown("### 🎯 Passport Timeline Range per City")
+    rng_data = []
+    for city in selected:
+        bt = (v(pr_fast,city) + v(cit_fast,city)
+              if pd.notna(v(pr_fast,city)) and pd.notna(v(cit_fast,city)) else np.nan)
+        wt_ = (v(pr_gen,city) + v(cit_real,city)
+               if pd.notna(v(pr_gen,city)) and pd.notna(v(cit_real,city)) else np.nan)
+        if pd.notna(bt) and pd.notna(wt_):
+            rng_data.append({"City":city,"Best":bt,"Worst":wt_,"Range":wt_-bt})
+
+    if rng_data:
+        rng_df = pd.DataFrame(rng_data).sort_values("Best")
+        fig_range = go.Figure()
+        for _, r_ in rng_df.iterrows():
+            fig_range.add_shape(
+                type="line",
+                x0=r_["Best"], x1=r_["Worst"],
+                y0=r_["City"],  y1=r_["City"],
+                line=dict(color="rgba(255,255,255,.3)", width=8),
+            )
+        fig_range.add_scatter(
+            x=rng_df["Best"],  y=rng_df["City"],
+            mode="markers+text",
+            marker=dict(size=16, color="#27ae60", symbol="circle"),
+            text=[f"{v:.0f}y" for v in rng_df["Best"]],
+            textposition="middle right",
+            name="🟢 Best case",
+        )
+        fig_range.add_scatter(
+            x=rng_df["Worst"], y=rng_df["City"],
+            mode="markers+text",
+            marker=dict(size=16, color="#d63031", symbol="circle"),
+            text=[f"{v:.0f}y" for v in rng_df["Worst"]],
+            textposition="middle left",
+            name="🔴 Worst case",
+        )
+        fig_range.update_layout(
+            title="Passport Timeline Range: Best → Worst (years from arrival)",
+            xaxis_title="Years",
+            height=max(320, len(rng_df) * 55 + 80),
+            xaxis=dict(gridcolor="rgba(255,255,255,.12)"),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig_range, use_container_width=True, config=PLOTLY_CFG)
+
+    # ── Buffer vs savings
+    st.markdown("### 🛡️ Financial Buffer Required vs Your Savings")
     fg_bf = go.Figure()
-    fg_bf.add_bar(x=selected, y=[v(buf_r,c) for c in selected],
-                  name="Required Buffer", marker_color="#e74c3c")
-    fg_bf.add_bar(x=selected, y=[FINAL_SAVED] * len(selected),
-                  name=f"Your Savings by {target_year}", marker_color="#27ae60")
+    fg_bf.add_bar(x=selected, y=[v(buf_rr,c) for c in selected],
+                  name="Required Buffer", marker_color="#e74c3c",
+                  text=[f"${v(buf_rr,c):,.0f}" if pd.notna(v(buf_rr,c)) else "—"
+                        for c in selected], textposition="outside")
+    fg_bf.add_bar(x=selected, y=[FINAL_SAVED]*len(selected),
+                  name=f"Your Savings ({target_year})", marker_color="#27ae60",
+                  text=[f"${FINAL_SAVED:,.0f}"]*len(selected), textposition="outside")
     fg_bf.update_layout(barmode="group", yaxis_tickformat="$,.0f",
                         title="1-Year Buffer Required vs Your Projected Savings")
     chart(fg_bf, 400)
 
     cov_vals = [
-        FINAL_SAVED / v(buf_r, c) * 100
-        if pd.notna(v(buf_r, c)) and v(buf_r, c) > 0 else 0.0
+        FINAL_SAVED / v(buf_rr, c) * 100
+        if pd.notna(v(buf_rr, c)) and v(buf_rr, c) > 0 else 0.0
         for c in selected
     ]
     fig_cg = px.bar(x=selected, y=cov_vals,
-                    title="Buffer coverage — your savings as % of required",
+                    title="Buffer Coverage % (your savings / required)",
                     color=cov_vals,
-                    color_continuous_scale=[[0,"#e74c3c"],[0.5,"#f39c12"],[1,"#27ae60"]])
-    fig_cg.add_hline(y=100, line_dash="dash", line_color="white",
-                     annotation_text="100% goal")
+                    color_continuous_scale=[[0,"#e74c3c"],[0.5,"#f39c12"],[1,"#27ae60"]],
+                    text=[f"{vv:.0f}%" for vv in cov_vals])
+    fig_cg.update_traces(textposition="outside")
+    fig_cg.add_hline(y=100, line_dash="dash", line_color="white", annotation_text="100% goal")
     fig_cg.update_layout(showlegend=False, yaxis_title="%", coloraxis_showscale=False)
     chart(fig_cg, 340)
 
-    st.markdown("### 📋 Immigration Table")
-    st.dataframe(
-        imm_df.style
-              .bar(subset=["PR Fast (yrs)","PR General (yrs)","Citizen Fast (yrs)","Citizen Real (yrs)"],
-                   color=["#27ae60","#e74c3c"], align="left")
-              .format("{:.1f}"),
-        use_container_width=True,
-    )
+    # ── immigration summary table
+    st.markdown("### 📋 Immigration Data Table")
+    IMM_M: Dict[str, str] = {
+        "PR Fast (yrs)"     : "PR (Years) Fast Track",
+        "PR General (yrs)"  : "PR (Years) General Path",
+        "Citizen Fast (yrs)": "Citizenship (Years) Fast",
+        "Citizen Real (yrs)": "Citizenship (Years) Real",
+        "Best total (yrs)"  : "",  # computed below
+        "Worst total (yrs)" : "",
+        "Passport Diff."    : "BY Passport Difficulty",
+        "IELTS"             : "IELTS / Language",
+        "1yr Buffer ($k)"   : "1 Year Buffer (USD), $k",
+        "Salary 4-5y ($k)"  : "Salary (4-5y exp), $k",
+    }
+    imm_df = pd.DataFrame({k: row(m, selected) if m else np.nan
+                            for k, m in IMM_M.items()}, index=selected)
+    for city in selected:
+        bt_ = v(pr_fast,city)+v(cit_fast,city) if pd.notna(v(pr_fast,city)) and pd.notna(v(cit_fast,city)) else np.nan
+        wt_ = v(pr_gen,city)+v(cit_real,city)  if pd.notna(v(pr_gen,city))  and pd.notna(v(cit_real,city))  else np.nan
+        imm_df.loc[city, "Best total (yrs)"]  = bt_
+        imm_df.loc[city, "Worst total (yrs)"] = wt_
+    st.dataframe(imm_df.round(1), use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1300,3 +1692,272 @@ with TABS[7]:
             c4.metric("Immigration",     f"{rs['Immigration']:.1f}")
             c5.metric("Environment",     f"{rs['Environment']:.1f}")
             st.caption(caption)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8 · COMPARE vs MINSK
+# ══════════════════════════════════════════════════════════════════════════════
+with TABS[8]:
+    st.subheader("🆚 City vs City Comparison (always vs Minsk)")
+
+    # ensure Minsk is loaded
+    MINSK = "Minsk"
+    if MINSK not in CITIES:
+        st.warning("Minsk not found in data.")
+    else:
+        # pick up to 2 non-Minsk cities to compare
+        other_choices = [c for c in CITIES if c != MINSK]
+        default_cmp = [c for c in selected if c != MINSK][:2] or other_choices[:2]
+        cmp_cities = st.multiselect(
+            "Pick 1–2 cities to compare vs Minsk:",
+            options=other_choices,
+            default=default_cmp,
+            max_selections=2,
+            key="cmp_cities",
+        )
+        if not cmp_cities:
+            st.info("Select at least one city above.")
+        else:
+            CMP_ALL: List[str] = cmp_cities + [MINSK]
+            # ── ensure Minsk is in MINDEX columns
+            cmp_avail = [c for c in CMP_ALL if c in MINDEX.columns]
+
+            def crow(metric: str) -> pd.Series:
+                return row(metric, cmp_avail)
+
+            def ceff(city_: str, sal_ser_: "pd.Series") -> float:
+                if use_custom_sal and city_ != MINSK:
+                    return CUSTOM_SAL_TOTAL
+                return v(sal_ser_, city_)
+
+            # ──────────────────────────────────────────────────────────────────
+            # DIMENSION TABLE with delta vs Minsk
+            # ──────────────────────────────────────────────────────────────────
+            st.markdown("### 📊 Head-to-Head Metrics vs Minsk")
+
+            CMP_METRICS: Dict[str, str] = {
+                "Avg Salary $/mo"        : "Avg Salary, USD/mo",
+                "Dev Salary $/mo"        : "Avg Salary Dev, USD/mo",
+                "Base Expenses (1p)"     : "Total Base / 1 people, USD/mo",
+                "Base Expenses (2p)"     : "Total Base / 2 people, USD/mo",
+                "Rent 1BR centre"        : "1 bed. ap. in city centre",
+                "Buy 80m² centre"        : "Buy Apartment Price in centre, 80m*m / USD",
+                "Quality of Life"        : "Quality of life",
+                "Safety"                 : "Safety",
+                "Crime Index ↓"          : "Crime index",
+                "Healthcare"             : "Health care",
+                "Climate"                : "Climate",
+                "Pollution ↓"            : "Pollution",
+                "Internet Mbps"          : "Internet Speed (Mbps)",
+                "Purch. Power"           : "Purch, power",
+                "PR Fast Track (yrs)"    : "PR (Years) Fast Track",
+                "Citizenship Fast (yrs)" : "Citizenship (Years) Fast",
+                "1yr Buffer $k"          : "1 Year Buffer (USD), $k",
+                "Sunny days %"           : "Sunny days, %",
+                "Immigrants %"           : "Immigrants, %",
+            }
+
+            cmp_df = pd.DataFrame(
+                {lbl: crow(m) for lbl, m in CMP_METRICS.items()},
+                index=cmp_avail,
+            ).T.round(1)
+
+            # compute delta vs Minsk for each metric
+            minsk_col = cmp_df.get(MINSK) if MINSK in cmp_df.columns else None
+            lower_better = {"Crime Index ↓", "Pollution ↓", "PR Fast Track (yrs)",
+                            "Citizenship Fast (yrs)", "1yr Buffer $k",
+                            "Base Expenses (1p)", "Base Expenses (2p)", "Rent 1BR centre"}
+
+            # render as plotly table with delta vs Minsk
+            tbl_rows = []
+            for metric_lbl in cmp_df.index:
+                row_d = {"Metric": metric_lbl}
+                for city_ in cmp_avail:
+                    val_ = cmp_df.loc[metric_lbl, city_] if city_ in cmp_df.columns else np.nan
+                    row_d[city_] = val_
+                # delta for non-Minsk cities
+                if minsk_col is not None:
+                    m_val = float(minsk_col.get(metric_lbl, np.nan)) if hasattr(minsk_col, "get") else float(minsk_col.loc[metric_lbl])
+                    for cmp_c in cmp_cities:
+                        if cmp_c in cmp_df.columns:
+                            c_val = float(cmp_df.loc[metric_lbl, cmp_c]) if not pd.isna(cmp_df.loc[metric_lbl, cmp_c]) else np.nan
+                            if pd.notna(c_val) and pd.notna(m_val) and m_val != 0:
+                                delta_pct = (c_val - m_val) / abs(m_val) * 100
+                                better = (delta_pct > 0) if metric_lbl not in lower_better else (delta_pct < 0)
+                                sign = "▲" if delta_pct > 0 else "▼"
+                                color = "#27ae60" if better else "#e74c3c"
+                                row_d[f"Δ vs Minsk ({cmp_c})"] = f"<span style='color:{color}'>{sign}{abs(delta_pct):.0f}%</span>"
+                tbl_rows.append(row_d)
+
+            # show as dataframe with numeric values (delta in separate expander)
+            plain_df = cmp_df.copy()
+            st.dataframe(plain_df.round(1), use_container_width=True)
+
+            # ──────────────────────────────────────────────────────────────────
+            # SPIDER / RADAR comparison
+            # ──────────────────────────────────────────────────────────────────
+            st.markdown("### 🕸️ Radar: City vs Minsk")
+            R_CMP_M = ["Quality of life","Safety","Purch, power","Health care",
+                       "Climate","Internet Speed (Mbps)","Pollution"]
+            R_CMP_L = ["Quality","Safety","Purch.Power","Healthcare",
+                       "Climate","Internet","Clean Air"]
+            R_CMP_X = [250,100,200,100,100,350,100]
+            R_CMP_I = [False,False,False,False,False,False,True]
+
+            fig_cmp_r = go.Figure()
+            cmp_colors = ["#f06292","#42a5f5","#66bb6a","#ffa726"]  # pink for first
+            for i_, city_ in enumerate(cmp_avail):
+                nrm = []
+                for m_,mx_,inv_ in zip(R_CMP_M, R_CMP_X, R_CMP_I):
+                    raw_ = v(crow(m_), city_) or 0
+                    p_   = min(raw_/mx_*100, 100)
+                    nrm.append(100 - p_ if inv_ else p_)
+                clr_ = cmp_colors[i_ % len(cmp_colors)]
+                lw_  = 3.5 if city_ == MINSK else 2.0
+                fig_cmp_r.add_trace(go.Scatterpolar(
+                    r=nrm+[nrm[0]], theta=R_CMP_L+[R_CMP_L[0]],
+                    fill="toself", name=city_,
+                    line=dict(color=clr_, width=lw_,
+                              dash="dot" if city_==MINSK else "solid"),
+                    opacity=0.85,
+                ))
+            fig_cmp_r.update_layout(
+                polar=dict(
+                    bgcolor="rgba(10,20,35,0.7)",
+                    radialaxis=dict(visible=True, range=[0,100],
+                                   tickvals=[25,50,75,100],
+                                   tickfont=dict(size=9,color="#aaa"),
+                                   gridcolor="rgba(255,255,255,.12)"),
+                    angularaxis=dict(tickfont=dict(size=12,color="#ddd"),
+                                    gridcolor="rgba(255,255,255,.08)"),
+                ),
+                paper_bgcolor="rgba(0,0,0,0)",
+                legend=dict(orientation="h", y=-0.15, xanchor="center", x=0.5),
+                margin=dict(l=30,r=30,t=30,b=60),
+            )
+            chart(fig_cmp_r, 560)
+
+            # ──────────────────────────────────────────────────────────────────
+            # % DELTA BARS per city vs Minsk
+            # ──────────────────────────────────────────────────────────────────
+            st.markdown("### 📊 % Difference vs Minsk (per metric)")
+            delta_metric_keys = list(CMP_METRICS.keys())
+            for cmp_city in cmp_cities:
+                st.markdown(f"#### {cmp_city} vs Minsk")
+                d_vals, d_colors, d_labels = [], [], []
+                for lbl_d in delta_metric_keys:
+                    m_v = v(crow(CMP_METRICS[lbl_d]), MINSK)
+                    c_v = v(crow(CMP_METRICS[lbl_d]), cmp_city)
+                    if pd.notna(m_v) and pd.notna(c_v) and m_v != 0:
+                        delta_d = (c_v - m_v) / abs(m_v) * 100
+                        better  = delta_d > 0 if lbl_d not in lower_better else delta_d < 0
+                        d_vals.append(delta_d)
+                        d_colors.append("#27ae60" if better else "#e74c3c")
+                        d_labels.append(lbl_d)
+                    else:
+                        d_vals.append(0); d_colors.append("#888"); d_labels.append(lbl_d)
+
+                fig_delta = go.Figure(go.Bar(
+                    y=d_labels, x=d_vals,
+                    orientation="h",
+                    marker_color=d_colors,
+                    text=[f"{x:+.0f}%" for x in d_vals],
+                    textposition="outside",
+                ))
+                fig_delta.add_vline(x=0, line_dash="dash", line_color="white", opacity=.5)
+                fig_delta.update_layout(
+                    title=f"{cmp_city} relative to Minsk (green = better, red = worse)",
+                    height=max(400, len(d_labels)*28 + 80),
+                    xaxis_title="% difference vs Minsk",
+                    margin=dict(l=4, r=60, t=46, b=8),
+                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                )
+                st.plotly_chart(fig_delta, use_container_width=True, config=PLOTLY_CFG)
+
+            # ──────────────────────────────────────────────────────────────────
+            # NARRATIVE: Why better / worse than Minsk
+            # ──────────────────────────────────────────────────────────────────
+            st.markdown("### 💬 Why Better or Worse than Minsk?")
+            for cmp_city in cmp_cities:
+                better_pts, worse_pts = [], []
+                NARR_METRICS = {
+                    "Salary"         : ("Avg Salary, USD/mo",            False, "$"),
+                    "Dev Salary"     : ("Avg Salary Dev, USD/mo",         False, "$"),
+                    "Expenses (1p)"  : ("Total Base / 1 people, USD/mo",  True,  "$"),
+                    "Rent 1BR"       : ("1 bed. ap. in city centre",      True,  "$"),
+                    "Quality/Life"   : ("Quality of life",                False, ""),
+                    "Safety"         : ("Safety",                         False, ""),
+                    "Crime"          : ("Crime index",                    True,  ""),
+                    "Healthcare"     : ("Health care",                    False, ""),
+                    "Climate"        : ("Climate",                        False, ""),
+                    "Pollution"      : ("Pollution",                      True,  ""),
+                    "Internet"       : ("Internet Speed (Mbps)",          False, "Mbps"),
+                    "Purch.Power"    : ("Purch, power",                   False, ""),
+                    "PR Fast (yrs)"  : ("PR (Years) Fast Track",          True,  "yrs"),
+                    "Citizenship"    : ("Citizenship (Years) Fast",       True,  "yrs"),
+                }
+                for lbl_n, (met_n, lower_b, unit) in NARR_METRICS.items():
+                    m_v = v(crow(met_n), MINSK)
+                    c_v = v(crow(met_n), cmp_city)
+                    if pd.isna(m_v) or pd.isna(c_v) or m_v == 0:
+                        continue
+                    delta_n = (c_v - m_v) / abs(m_v) * 100
+                    better  = delta_n > 0 if not lower_b else delta_n < 0
+                    unit_s  = f" {unit}" if unit == "$" else (f" {unit}" if unit else "")
+                    if unit == "$":
+                        val_s = f"${c_v:,.0f}/mo vs ${m_v:,.0f}/mo"
+                    elif unit == "yrs":
+                        val_s = f"{c_v:.0f} vs {m_v:.0f} yrs"
+                    elif unit == "Mbps":
+                        val_s = f"{c_v:.0f} vs {m_v:.0f} Mbps"
+                    else:
+                        val_s = f"{c_v:.0f} vs {m_v:.0f}"
+                    txt = f"**{lbl_n}**: {val_s} ({delta_n:+.0f}%)"
+                    if better:
+                        better_pts.append(txt)
+                    else:
+                        worse_pts.append(txt)
+
+                with st.expander(f"📋 {cmp_city} vs Minsk — full breakdown", expanded=True):
+                    col_b, col_w = st.columns(2)
+                    with col_b:
+                        st.markdown(f"#### ✅ {cmp_city} is **better**")
+                        for pt in better_pts:
+                            st.markdown(f"- {pt}")
+                        if not better_pts:
+                            st.caption("No advantages found in these metrics.")
+                    with col_w:
+                        st.markdown(f"#### ❌ {cmp_city} is **worse**")
+                        for pt in worse_pts:
+                            st.markdown(f"- {pt}")
+                        if not worse_pts:
+                            st.caption("No disadvantages found in these metrics.")
+
+            # ──────────────────────────────────────────────────────────────────
+            # FINANCIAL side-by-side bar
+            # ──────────────────────────────────────────────────────────────────
+            st.markdown("### 💰 Financial Direct Comparison")
+            fin_cmp_metrics = {
+                "Avg Salary"    : "Avg Salary, USD/mo",
+                "Dev Salary"    : "Avg Salary Dev, USD/mo",
+                "Base Exp (1p)" : "Total Base / 1 people, USD/mo",
+                "Rent 1BR"      : "1 bed. ap. in city centre",
+            }
+            fig_fin_cmp = go.Figure()
+            fin_colors_cmp = ["#f06292","#42a5f5","#66bb6a","#ffa726"]
+            for i_c, city_ in enumerate(cmp_avail):
+                fig_fin_cmp.add_bar(
+                    x=list(fin_cmp_metrics.keys()),
+                    y=[v(crow(m_), city_) for m_ in fin_cmp_metrics.values()],
+                    name=city_,
+                    marker_color=fin_colors_cmp[i_c % len(fin_colors_cmp)],
+                    text=[f"${v(crow(m_),city_):,.0f}" for m_ in fin_cmp_metrics.values()],
+                    textposition="outside",
+                )
+            fig_fin_cmp.update_layout(
+                barmode="group",
+                yaxis_tickformat="$,.0f",
+                title="Financial Metrics: Selected Cities vs Minsk",
+                legend=dict(orientation="h", y=1.12),
+            )
+            chart(fig_fin_cmp, 440)
