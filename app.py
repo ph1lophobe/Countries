@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import pandas as pd
@@ -91,6 +91,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def to_safe_float(val: Any) -> float:
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return float('nan')
+
 # ─── DATA LOADING ─────────────────────────────────────────────────────────────
 def _num(val: Any) -> float:
     """Parse cell → float. Handles EU decimals, thousands, k-suffix, $, %."""
@@ -126,14 +132,12 @@ def load_data() -> Tuple[pd.DataFrame, List[str], Optional[str]]:
     except Exception as exc:
         return pd.DataFrame(), [], str(exc)
 
-    # find city-header row (col C == "Auckland")
     city_hdr = next(
         (i for i in range(len(raw)) if str(raw.iloc[i, 2]).strip() == "Auckland"), -1
     )
     if city_hdr == -1:
         return pd.DataFrame(), [], "City header row not found."
 
-    # find country-header row (col B == "Country")
     country_hdr = next(
         (i for i in range(city_hdr) if str(raw.iloc[i, 1]).strip().lower() == "country"), -1
     )
@@ -167,7 +171,6 @@ def load_data() -> Tuple[pd.DataFrame, List[str], Optional[str]]:
     parsed = parse_block(city_hdr + 1, len(raw))
     city_metric_set = {r["Metric"] for r in parsed}
 
-    # broadcast country-level rows to all cities of that country
     if country_hdr >= 0:
         ch = raw.iloc[country_hdr]
         ctry_cols: List[Tuple[int, str]] = [
@@ -180,7 +183,9 @@ def load_data() -> Tuple[pd.DataFrame, List[str], Optional[str]]:
             if not name or name.lower() in skip_metrics or name in city_metric_set:
                 continue
             cvals = {lbl: _num(raw.iloc[ri, j]) for j, lbl in ctry_cols}
-            rec = {"Metric": name}
+            
+            rec: Dict[str, Any] = {"Metric": name}
+            
             for city in cities:
                 cc = CITY_TO_COUNTRY.get(city)
                 rec[city] = cvals.get(cc, np.nan) if cc else np.nan
@@ -232,11 +237,7 @@ def chart(fig: go.Figure, h: int = 420) -> None:
 def styled_df(df_in: pd.DataFrame, money_cols: List[str],
               pct_cols: Optional[List[str]] = None,
               plain_cols: Optional[List[str]] = None) -> Any:
-    """
-    Return a Styler with color-coding but WITHOUT background_gradient
-    (which requires matplotlib and crashes on Streamlit Cloud).
-    Uses bar() instead — works with only pandas+plotly.
-    """
+
     s = df_in.style
     for col in money_cols:
         if col in df_in.columns:
@@ -394,6 +395,7 @@ TABS = st.tabs([
     "📈 Savings Plan",
     "🏆 Final Score",
     "🆚 Compare vs Minsk",
+    "🌐 Visa & Residency Guide",
 ])
 
 
@@ -539,13 +541,16 @@ with TABS[0]:
         fmt_str = fmt_map.get(r_name, "{:.0f}")
         for c_name in q_df.columns:
             val_ = q_df.loc[r_name, c_name]
-            if pd.notna(val_) and not math.isnan(float(val_)):
+            f_val = to_safe_float(val_)
+            
+            if pd.notna(val_) and not math.isnan(f_val):
                 try:
-                    row_txt.append(fmt_str.format(float(val_)))
+                    row_txt.append(fmt_str.format(f_val))
                 except Exception:
-                    row_txt.append(f"{val_:.0f}")
+                    row_txt.append(f"{f_val:.0f}")
             else:
                 row_txt.append("—")
+                
         text_q.append(row_txt)
 
     fig_qhm = go.Figure(go.Heatmap(
@@ -935,7 +940,7 @@ with TABS[3]:
     }
     groc_df = pd.DataFrame({k: row(m, selected) for k, m in GROC.items()}, index=selected).T
     fig_gr = px.imshow(groc_df, color_continuous_scale="RdYlGn_r",
-                       title="Price Heatmap (USD)", aspect="auto", text_auto=".2f")
+                       title="Price Heatmap (USD)", aspect="auto")
     fig_gr.update_coloraxes(showscale=False)
     chart(fig_gr, 520)
 
@@ -1008,7 +1013,7 @@ with TABS[4]:
     }
     qol_df = pd.DataFrame({k: row(m, selected) for k, m in QOL_M.items()}, index=selected)
     fig_qhm = px.imshow(qol_df.T, color_continuous_scale="RdYlGn",
-                        title="Quality of Life Heatmap", aspect="auto", text_auto=".1f")
+                        title="Quality of Life Heatmap", aspect="auto")
     fig_qhm.update_coloraxes(showscale=False)
     chart(fig_qhm, 420)
 
@@ -1777,18 +1782,26 @@ with TABS[8]:
                     row_d[city_] = val_
                 # delta for non-Minsk cities
                 if minsk_col is not None:
-                    m_val = float(minsk_col.get(metric_lbl, np.nan)) if hasattr(minsk_col, "get") else float(minsk_col.loc[metric_lbl])
+                    # Приводим к Any, чтобы Pylance разрешил конвертацию во float
+                    if hasattr(minsk_col, "get"):
+                        m_val = float(cast(Any, minsk_col.get(metric_lbl, np.nan)))
+                    else:
+                        m_val = float(cast(Any, minsk_col.loc[metric_lbl]))
+                        
                     for cmp_c in cmp_cities:
                         if cmp_c in cmp_df.columns:
-                            c_val = float(cmp_df.loc[metric_lbl, cmp_c]) if not pd.isna(cmp_df.loc[metric_lbl, cmp_c]) else np.nan
+                            # Выносим сырое значение для читаемости и проверяем на натривиальные NaN
+                            raw_val = cmp_df.loc[metric_lbl, cmp_c]
+                            c_val = float(cast(Any, raw_val)) if not pd.isna(raw_val) else np.nan
+                            
                             if pd.notna(c_val) and pd.notna(m_val) and m_val != 0:
                                 delta_pct = (c_val - m_val) / abs(m_val) * 100
                                 better = (delta_pct > 0) if metric_lbl not in lower_better else (delta_pct < 0)
                                 sign = "▲" if delta_pct > 0 else "▼"
                                 color = "#27ae60" if better else "#e74c3c"
                                 row_d[f"Δ vs Minsk ({cmp_c})"] = f"<span style='color:{color}'>{sign}{abs(delta_pct):.0f}%</span>"
-                tbl_rows.append(row_d)
-
+                                
+                    tbl_rows.append(row_d)
             # show as dataframe with numeric values (delta in separate expander)
             plain_df = cmp_df.copy()
             st.dataframe(plain_df.round(1), use_container_width=True)
@@ -1961,3 +1974,799 @@ with TABS[8]:
                 legend=dict(orientation="h", y=1.12),
             )
             chart(fig_fin_cmp, 440)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 9 · VISA & RESIDENCY GUIDE  (AI-powered, live web search via Claude API)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 9 · VISA & RESIDENCY GUIDE  (static, structured, official sources)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── DATA ──────────────────────────────────────────────────────────────────────
+VISA_DB: Dict[str, Any] = {
+
+  "New Zealand 🇳🇿": {
+    "flag": "🇳🇿",
+    "official": "https://www.immigration.govt.nz",
+    "points_system": True,
+    "dual_citizenship": True,
+    "eu_member": False,
+    "notes": "Points-based Skilled Migrant Category. Strong demand for IT, healthcare, trades.",
+    "visas": [
+      {"name": "Visitor Visa", "type": "tourist", "duration": "Up to 9 months",
+       "fee": "NZD 246", "processing": "20–30 days",
+       "requirements": ["Passport valid 3+ months", "Return ticket", "Sufficient funds (~NZD 1000/mo)", "Travel insurance"],
+       "link": "https://www.immigration.govt.nz/new-zealand-visas/apply-for-a-visa/about-visa/visitor-visa"},
+      {"name": "Working Holiday Visa", "type": "work", "duration": "12 months (extendable to 23)",
+       "fee": "NZD 310", "processing": "Online, instant–7 days",
+       "requirements": ["Age 18–30 (35 for some countries)", "BY/RU not eligible — check list", "NZD 4,200 funds", "Return ticket or funds"],
+       "link": "https://www.immigration.govt.nz/new-zealand-visas/apply-for-a-visa/about-visa/working-holiday-visa"},
+      {"name": "Skilled Migrant Category (SMC)", "type": "skilled_work", "duration": "Permanent",
+       "fee": "NZD 4,310", "processing": "6–18 months",
+       "requirements": ["160+ points EOI", "Job offer in NZ preferred", "IELTS 6.5+", "Age under 56", "Skilled occupation"],
+       "link": "https://www.immigration.govt.nz/new-zealand-visas/apply-for-a-visa/about-visa/skilled-migrant-category-resident-visa"},
+      {"name": "Accredited Employer Work Visa", "type": "work", "duration": "1–3 years",
+       "fee": "NZD 750", "processing": "4–8 weeks",
+       "requirements": ["Job offer from accredited NZ employer", "Relevant skills/qualifications", "Median wage NZD 29.66/hr+"],
+       "link": "https://www.immigration.govt.nz/new-zealand-visas/apply-for-a-visa/about-visa/accredited-employer-work-visa"},
+      {"name": "Student Visa", "type": "study", "duration": "Duration of course",
+       "fee": "NZD 375", "processing": "4–6 weeks",
+       "requirements": ["Enrollment at approved NZ institution", "NZD 15,000/yr funds", "Health insurance", "English proficiency"],
+       "link": "https://www.immigration.govt.nz/new-zealand-visas/apply-for-a-visa/about-visa/student-visa"},
+      {"name": "Investor Visa (Investor 2)", "type": "investment", "duration": "Permanent",
+       "fee": "NZD 5,050", "processing": "18+ months",
+       "requirements": ["NZD 3 million investment for 4 years", "Business experience", "English or commitment to learn", "Age under 66"],
+       "link": "https://www.immigration.govt.nz/new-zealand-visas/apply-for-a-visa/about-visa/investor-2-category-resident-visa"},
+    ],
+    "residency": [
+      {"stage": "Temporary", "name": "Accredited Employer Work Visa / Student Visa",
+       "min_years": "1–3 years", "key_req": "Valid job offer OR study enrollment",
+       "cost": "NZD 750–1,500", "link": "https://www.immigration.govt.nz"},
+      {"stage": "Permanent (PR)", "name": "Skilled Migrant Category",
+       "min_years": "2 years on work visa", "key_req": "160 SMC points, job offer strongly preferred, IELTS 6.5+",
+       "cost": "NZD 4,310", "link": "https://www.immigration.govt.nz/new-zealand-visas/apply-for-a-visa/about-visa/skilled-migrant-category-resident-visa"},
+      {"stage": "Citizenship", "name": "Naturalization",
+       "min_years": "5 years PR (1,350 days physically present)", "key_req": "Good character, intent to stay, basic English",
+       "cost": "NZD 470", "link": "https://www.immigration.govt.nz/new-zealand-visas/preparing-a-visa-application/citizenship"},
+    ],
+    "points": {
+      "system_name": "Skilled Migrant Category Points",
+      "min_score": 160,
+      "current_cutoff": "160 (as of 2024)",
+      "calculator_link": "https://www.immigration.govt.nz/new-zealand-visas/apply-for-a-visa/tools-and-information/tools/points-indicator",
+      "criteria": [
+        {"factor": "Age 20–39", "points": 30},
+        {"factor": "Age 40–44", "points": 20},
+        {"factor": "Age 45–49", "points": 10},
+        {"factor": "Skilled employment in NZ (current)", "points": 50},
+        {"factor": "Skilled employment offer in NZ", "points": 50},
+        {"factor": "Skilled work experience 2–5 years", "points": 10},
+        {"factor": "Skilled work experience 6–9 years", "points": 20},
+        {"factor": "Skilled work experience 10+ years", "points": 30},
+        {"factor": "NZ work experience (each year)", "points": 10},
+        {"factor": "PhD from NZ institution", "points": 70},
+        {"factor": "Bachelor/Master's degree", "points": 50},
+        {"factor": "Diploma/Trade cert", "points": 40},
+        {"factor": "Partner with skilled employment/offer", "points": 20},
+        {"factor": "Job/study outside Auckland", "points": 30},
+      ],
+    },
+  },
+
+  "Australia 🇦🇺": {
+    "flag": "🇦🇺",
+    "official": "https://immi.homeaffairs.gov.au",
+    "points_system": True,
+    "dual_citizenship": True,
+    "eu_member": False,
+    "notes": "SkillSelect EOI system. 189/190/491 visas for skilled migrants. Strong tech demand.",
+    "visas": [
+      {"name": "Visitor Visa (subclass 600)", "type": "tourist", "duration": "3–12 months",
+       "fee": "AUD 190", "processing": "1 day – 8 weeks",
+       "requirements": ["Genuine visitor intent", "Sufficient funds", "Strong home ties"],
+       "link": "https://immi.homeaffairs.gov.au/visas/getting-a-visa/visa-listing/visitor-600"},
+      {"name": "Skilled Independent (189)", "type": "skilled_work", "duration": "Permanent",
+       "fee": "AUD 4,770", "processing": "12–24 months",
+       "requirements": ["65+ EOI points", "Age under 45", "Skills assessment", "IELTS 6.0+", "Occupation on MLTSSL"],
+       "link": "https://immi.homeaffairs.gov.au/visas/getting-a-visa/visa-listing/skilled-independent-189"},
+      {"name": "Skilled Nominated (190)", "type": "skilled_work", "duration": "Permanent",
+       "fee": "AUD 4,770", "processing": "12–24 months",
+       "requirements": ["65+ EOI points (+5 for nomination)", "State nomination", "Occupation on state list"],
+       "link": "https://immi.homeaffairs.gov.au/visas/getting-a-visa/visa-listing/skilled-nominated-190"},
+      {"name": "Skilled Regional (491)", "type": "skilled_work", "duration": "5 years (pathway to PR)",
+       "fee": "AUD 4,770", "processing": "12–24 months",
+       "requirements": ["65+ points (+15 for regional)", "State/family nomination", "Live in regional area"],
+       "link": "https://immi.homeaffairs.gov.au/visas/getting-a-visa/visa-listing/skilled-work-regional-491"},
+      {"name": "Temporary Skill Shortage (482)", "type": "work", "duration": "2–4 years",
+       "fee": "AUD 1,455–2,770", "processing": "3–10 months",
+       "requirements": ["Employer sponsorship", "Relevant skills + 2 yrs experience", "Occupation on STSOL/MLTSSL"],
+       "link": "https://immi.homeaffairs.gov.au/visas/getting-a-visa/visa-listing/temporary-skill-shortage-482"},
+      {"name": "Global Talent (858)", "type": "exceptional", "duration": "Permanent",
+       "fee": "AUD 4,770", "processing": "2–6 months",
+       "requirements": ["Internationally recognized in target sector", "AUD 162,000+ salary or equivalent", "Endorsement"],
+       "link": "https://immi.homeaffairs.gov.au/visas/getting-a-visa/visa-listing/global-talent-858"},
+      {"name": "Business Innovation & Investment (888)", "type": "investment", "duration": "Permanent",
+       "fee": "AUD 4,770", "processing": "24+ months",
+       "requirements": ["AUD 800k–1.5M investment depending on stream", "Business ownership", "State nomination"],
+       "link": "https://immi.homeaffairs.gov.au/visas/getting-a-visa/visa-listing/business-innovation-and-investment-888"},
+    ],
+    "residency": [
+      {"stage": "Temporary", "name": "TSS 482 / 491 / Student 500",
+       "min_years": "2–5 years", "key_req": "Employer sponsorship or skills assessment",
+       "cost": "AUD 1,455–4,770", "link": "https://immi.homeaffairs.gov.au"},
+      {"stage": "Permanent (PR)", "name": "Subclass 189 / 190",
+       "min_years": "N/A (direct PR if invited)", "key_req": "65+ points, skills assessment, IELTS 6.0+",
+       "cost": "AUD 4,770", "link": "https://immi.homeaffairs.gov.au/visas/getting-a-visa/visa-listing/skilled-independent-189"},
+      {"stage": "Permanent (PR) via 491", "name": "Skilled Regional 191",
+       "min_years": "3 years on 491", "key_req": "3 yrs in regional area, income threshold",
+       "cost": "AUD 395", "link": "https://immi.homeaffairs.gov.au/visas/getting-a-visa/visa-listing/permanent-residence-skilled-regional-191"},
+      {"stage": "Citizenship", "name": "Australian Citizenship",
+       "min_years": "4 years (1 yr as PR)", "key_req": "Physical presence 4 of last 5 yrs, good character, English",
+       "cost": "AUD 490", "link": "https://immi.homeaffairs.gov.au/citizenship/become-a-citizen"},
+    ],
+    "points": {
+      "system_name": "SkillSelect Points Test",
+      "min_score": 65,
+      "current_cutoff": "80–95 for 189 (varies by round, check SkillSelect)",
+      "calculator_link": "https://immi.homeaffairs.gov.au/points-test-advice-online/points-test",
+      "criteria": [
+        {"factor": "Age 25–32", "points": 30},
+        {"factor": "Age 33–39", "points": 25},
+        {"factor": "Age 18–24 / 40–44", "points": 15},
+        {"factor": "Age 45–49", "points": 0},
+        {"factor": "Nominated / regional (190/491 bonus)", "points": "5 / 15"},
+        {"factor": "English: Competent (IELTS 6)", "points": 0},
+        {"factor": "English: Proficient (IELTS 7)", "points": 10},
+        {"factor": "English: Superior (IELTS 8)", "points": 20},
+        {"factor": "Overseas work exp 3–4 yrs", "points": 5},
+        {"factor": "Overseas work exp 5–7 yrs", "points": 10},
+        {"factor": "Overseas work exp 8–10 yrs", "points": 15},
+        {"factor": "Australian work exp 1 yr", "points": 5},
+        {"factor": "Australian work exp 3 yrs", "points": 10},
+        {"factor": "Australian work exp 5+ yrs", "points": 20},
+        {"factor": "Bachelor degree", "points": 15},
+        {"factor": "PhD", "points": 20},
+        {"factor": "Australian study (2 yrs)", "points": 5},
+        {"factor": "Regional study in Australia", "points": 5},
+        {"factor": "Accredited community language", "points": 5},
+        {"factor": "Partner skills on MLTSSL", "points": 10},
+        {"factor": "Partner IELTS 6+", "points": 5},
+        {"factor": "Single / partner AUS citizen", "points": 10},
+        {"factor": "Professional year in AUS", "points": 5},
+      ],
+    },
+  },
+
+  "Canada 🇨🇦": {
+    "flag": "🇨🇦",
+    "official": "https://www.canada.ca/en/immigration-refugees-citizenship.html",
+    "points_system": True,
+    "dual_citizenship": True,
+    "eu_member": False,
+    "notes": "Express Entry CRS system. Provincial Nominee Programs add 600 points guaranteed.",
+    "visas": [
+      {"name": "Visitor Visa (TRV)", "type": "tourist", "duration": "Up to 6 months",
+       "fee": "CAD 100", "processing": "2–8 weeks",
+       "requirements": ["Valid passport", "Financial proof", "No criminal record", "Ties to home country"],
+       "link": "https://www.canada.ca/en/immigration-refugees-citizenship/services/visit-canada.html"},
+      {"name": "Express Entry — Federal Skilled Worker", "type": "skilled_work", "duration": "Permanent",
+       "fee": "CAD 1,365 principal + CAD 1,365 spouse", "processing": "6 months after ITA",
+       "requirements": ["67+ FSW points (education, experience, language, age, job offer, adaptability)", "CRS score for ITA", "IELTS CLB 7+", "1 yr skilled work exp"],
+       "link": "https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry/eligibility/federal-skilled-workers.html"},
+      {"name": "Express Entry — Canadian Experience Class", "type": "skilled_work", "duration": "Permanent",
+       "fee": "CAD 1,365", "processing": "6 months",
+       "requirements": ["1 yr Canadian work exp in NOC 0/A/B", "CLB 7+ (NOC 0/A) or CLB 5+ (NOC B)"],
+       "link": "https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry/eligibility/canadian-experience-class.html"},
+      {"name": "Provincial Nominee Program (PNP)", "type": "skilled_work", "duration": "Permanent",
+       "fee": "CAD 1,365 + provincial fee", "processing": "12–24 months",
+       "requirements": ["Province-specific criteria", "Enhanced PNP: +600 CRS points (almost certain ITA)"],
+       "link": "https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/provincial-nominees.html"},
+      {"name": "Startup Visa", "type": "entrepreneur", "duration": "Permanent",
+       "fee": "CAD 1,575", "processing": "12–16 months",
+       "requirements": ["Support from designated org (VC/angel/accelerator)", "CLB 5+ English", "Sufficient funds"],
+       "link": "https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/start-up-visa.html"},
+      {"name": "Study Permit", "type": "study", "duration": "Duration of study",
+       "fee": "CAD 150", "processing": "4–16 weeks",
+       "requirements": ["Acceptance from DLI", "Financial proof CAD 10,000+/yr", "Language proficiency"],
+       "link": "https://www.canada.ca/en/immigration-refugees-citizenship/services/study-canada.html"},
+      {"name": "Post-Graduation Work Permit", "type": "work", "duration": "8 months – 3 years",
+       "fee": "CAD 255", "processing": "3–5 months",
+       "requirements": ["Grad from eligible Canadian school", "Full-time study 8+ months"],
+       "link": "https://www.canada.ca/en/immigration-refugees-citizenship/services/study-canada/work/after-graduation.html"},
+    ],
+    "residency": [
+      {"stage": "Temporary", "name": "Work Permit / Study Permit / IEC",
+       "min_years": "1–3 years", "key_req": "Job offer, study enrollment, or IEC eligibility",
+       "cost": "CAD 150–255", "link": "https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada.html"},
+      {"stage": "Permanent (PR)", "name": "Express Entry / PNP",
+       "min_years": "No minimum in Canada required for FSW; 1 yr CEC",
+       "key_req": "CRS score above cutoff (varies ~450–550), CLB 7+, skills assessment",
+       "cost": "CAD 1,365 (main app) + CAD 500 right of permanent residence",
+       "link": "https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry.html"},
+      {"stage": "Citizenship", "name": "Canadian Citizenship",
+       "min_years": "3 of last 5 years as PR (1,095 days)", "key_req": "CLB 4+ English/French, knowledge test, tax filing, age 18–54",
+       "cost": "CAD 630", "link": "https://www.canada.ca/en/immigration-refugees-citizenship/services/canadian-citizenship/become-canadian-citizen.html"},
+    ],
+    "points": {
+      "system_name": "Comprehensive Ranking System (CRS)",
+      "min_score": 67,
+      "current_cutoff": "~490–520 for general rounds; lower for targeted draws (check IRCC)",
+      "calculator_link": "https://www.cic.gc.ca/english/immigrate/skilled/crs-tool.asp",
+      "criteria": [
+        {"factor": "Age 20–29 (core / with spouse)", "points": "110 / 100"},
+        {"factor": "Age 30–34", "points": "105 / 95"},
+        {"factor": "Age 35–39", "points": "99 / 90"},
+        {"factor": "Age 40–44", "points": "79 / 72"},
+        {"factor": "PhD", "points": "150 / 140"},
+        {"factor": "Master's or professional", "points": "135 / 126"},
+        {"factor": "Bachelor's 3+ yrs", "points": "120 / 112"},
+        {"factor": "2-year diploma", "points": "98 / 91"},
+        {"factor": "1-year diploma", "points": "90 / 84"},
+        {"factor": "IELTS CLB 9 (all bands)", "points": "136 / 128"},
+        {"factor": "IELTS CLB 8 (all bands)", "points": "124 / 116"},
+        {"factor": "IELTS CLB 7 (all bands)", "points": "116 / 108"},
+        {"factor": "Canadian work exp 1 yr (NOC 0/A)", "points": "40"},
+        {"factor": "Canadian work exp 2–3 yrs", "points": "53–64"},
+        {"factor": "Canadian work exp 4–5 yrs", "points": "72–80"},
+        {"factor": "Foreign work exp 1–2 yrs", "points": "0–13"},
+        {"factor": "Foreign work exp 3+ yrs", "points": "25"},
+        {"factor": "PNP nomination", "points": "+600 (guaranteed ITA)"},
+        {"factor": "Valid job offer NOC 0/A/B", "points": "50–200"},
+        {"factor": "Canadian study 3+ yrs post-secondary", "points": "30"},
+        {"factor": "Sibling in Canada (PR/citizen)", "points": "15"},
+        {"factor": "French CLB 7+ (French-strong draws)", "points": "25–50"},
+      ],
+    },
+  },
+
+  "Poland 🇵🇱": {
+    "flag": "🇵🇱",
+    "official": "https://www.gov.pl/web/mswia-en/foreigners",
+    "points_system": False,
+    "dual_citizenship": True,
+    "eu_member": True,
+    "notes": "EU member. Getting PR = EU Long-Term Residence = right to move within EU. Popular route for BY/RU/UA.",
+    "visas": [
+      {"name": "National Visa (D) — Work", "type": "work", "duration": "Up to 1 year, renewable",
+       "fee": "EUR 80", "processing": "2–8 weeks",
+       "requirements": ["Work permit or employer declaration", "Employment contract", "Accommodation proof", "Health insurance"],
+       "link": "https://www.gov.pl/web/mswia-en/visas"},
+      {"name": "National Visa (D) — IT Specialist", "type": "work", "duration": "Up to 3 years",
+       "fee": "EUR 80", "processing": "2–4 weeks",
+       "requirements": ["IT job offer", "Relevant degree or experience", "Salary above threshold"],
+       "link": "https://www.gov.pl/web/poland-your-business/blue-card"},
+      {"name": "EU Blue Card (Poland)", "type": "skilled_work", "duration": "3 years",
+       "fee": "~PLN 440", "processing": "30 days",
+       "requirements": ["Higher education (min Bachelor's)", "Job offer min PLN 10,000 gross/mo", "Relevant qualification"],
+       "link": "https://udsc.gov.pl/en/cudzoziemcy/rodzaje-wiz-i-zezwolen/zezwolenie-na-pobyt-czasowy/niebieska-karta-ue/"},
+      {"name": "Poland Business Harbor", "type": "startup", "duration": "1 year, renewable",
+       "fee": "EUR 80", "processing": "7–14 days",
+       "requirements": ["IT specialist from BY/RU/UA (specific countries)", "Employer registered in Poland"],
+       "link": "https://www.gov.pl/web/polska-cyfrowa-en/poland-business-harbour"},
+      {"name": "Student Visa (D)", "type": "study", "duration": "Duration of study",
+       "fee": "EUR 80", "processing": "2–4 weeks",
+       "requirements": ["University acceptance letter", "Accommodation", "PLN 701+/mo funds", "Health insurance"],
+       "link": "https://nawa.gov.pl/en/students/study-in-poland"},
+      {"name": "Karta Polaka (Polish Heritage)", "type": "special", "duration": "Permanent card",
+       "fee": "Free", "processing": "1–3 months",
+       "requirements": ["Polish ancestry or Polish language + Polish identity", "Interview at Polish consulate"],
+       "link": "https://www.gov.pl/web/mswia-en/karta-polaka"},
+    ],
+    "residency": [
+      {"stage": "Temporary", "name": "Temporary Residence Permit (Karta Pobytu Czasowy)",
+       "min_years": "1–3 years (renewable)", "key_req": "Valid job/study/family reason, address, health insurance, income PLN 776+/mo per person",
+       "cost": "PLN 440 (work) / PLN 340 (study)", "link": "https://udsc.gov.pl/en/"},
+      {"stage": "Permanent (PR)", "name": "Permanent Residence Permit / EU Long-Term Resident",
+       "min_years": "5 years continuous legal stay", "key_req": "Stable income (min PLN 776+/mo), no criminal record, B1 Polish language or integration course",
+       "cost": "PLN 640", "link": "https://udsc.gov.pl/en/cudzoziemcy/rodzaje-wiz-i-zezwolen/zezwolenie-na-pobyt-staly/"},
+      {"stage": "Citizenship", "name": "Polish Naturalization",
+       "min_years": "3 yrs PR (5 yrs if no PR)", "key_req": "3 yrs continuous PR, B1+ Polish language, stable income, no criminal record",
+       "cost": "PLN 219", "link": "https://www.gov.pl/web/mswia-en/naturalisation"},
+    ],
+    "points": None,
+  },
+
+  "Netherlands 🇳🇱": {
+    "flag": "🇳🇱",
+    "official": "https://ind.nl/en",
+    "points_system": False,
+    "dual_citizenship": False,
+    "eu_member": True,
+    "notes": "No dual citizenship allowed (with exceptions). Highly developed knowledge economy. 30% tax ruling for expats.",
+    "visas": [
+      {"name": "Highly Skilled Migrant (HSM)", "type": "skilled_work", "duration": "1–3 years",
+       "fee": "EUR 290", "processing": "2–4 weeks",
+       "requirements": ["Recognised sponsor (registered company)", "Salary ≥ EUR 5,688/mo (2024, age 30+) or EUR 4,171 (<30) or EUR 3,170 (after study in NL)", "Degree"],
+       "link": "https://ind.nl/en/work/working_in_the_Netherlands/Pages/Highly-skilled-migrant.aspx"},
+      {"name": "EU Blue Card (Netherlands)", "type": "skilled_work", "duration": "4 years",
+       "fee": "EUR 290", "processing": "4 weeks",
+       "requirements": ["Higher education (min 3 yrs)", "Salary ≥ EUR 6,245/mo (2024)", "Recognised sponsor"],
+       "link": "https://ind.nl/en/work/working_in_the_Netherlands/Pages/EU-Blue-Card.aspx"},
+      {"name": "Orientation Year (Zoekjaar)", "type": "job_search", "duration": "1 year",
+       "fee": "EUR 174", "processing": "2–4 weeks",
+       "requirements": ["Graduated from top-200 university in last 3 yrs", "Or age 30+ with HSM 5+ yrs experience"],
+       "link": "https://ind.nl/en/work/working_in_the_Netherlands/Pages/Orientation-year-for-highly-educated-persons.aspx"},
+      {"name": "Startup Visa", "type": "entrepreneur", "duration": "1 year",
+       "fee": "EUR 174", "processing": "3–4 weeks",
+       "requirements": ["Innovative business plan", "Facilitator (accredited Dutch org)", "Sufficient funds"],
+       "link": "https://ind.nl/en/work/working_in_the_Netherlands/Pages/Start-up.aspx"},
+      {"name": "Self-Employed / Freelance (Zelfstandige)", "type": "entrepreneur", "duration": "2 years",
+       "fee": "EUR 174", "processing": "3 months",
+       "requirements": ["Points-based assessment (essential services, personal experience, business plan)", "Min 44/100 points for assessment", "Sufficient funds EUR 16,100"],
+       "link": "https://ind.nl/en/work/working_in_the_Netherlands/Pages/Self-employed-person-and-free-lancer.aspx"},
+    ],
+    "residency": [
+      {"stage": "Temporary", "name": "MVV + Residence Permit (Verblijfsvergunning)",
+       "min_years": "1–4 years", "key_req": "HSM / EU Blue Card / recognised sponsor; valid job",
+       "cost": "EUR 290", "link": "https://ind.nl/en"},
+      {"stage": "Permanent (PR)", "name": "Permanent Residence / EU Long-Term Resident",
+       "min_years": "5 continuous years", "key_req": "5 yrs legal stay, A2+ Dutch OR civic integration exam, stable income (min 100% bijstandsnorm), no benefit dependency",
+       "cost": "EUR 174", "link": "https://ind.nl/en/residence-permits/permanent-residence"},
+      {"stage": "Citizenship", "name": "Dutch Naturalization (Inburgeringseisen)",
+       "min_years": "5 yrs PR", "key_req": "5 yrs lawful stay, B1 Dutch (inburgeringsexamen), renounce other nationality (exceptions for BY/RU apply in some cases), good behavior",
+       "cost": "EUR 965", "link": "https://ind.nl/en/dutch-citizenship"},
+    ],
+    "points": None,
+  },
+
+  "Norway 🇳🇴": {
+    "flag": "🇳🇴",
+    "official": "https://www.udi.no/en",
+    "points_system": False,
+    "dual_citizenship": True,
+    "eu_member": False,
+    "notes": "EEA but not EU. High salaries. Accepts dual citizenship since 2020. Skilled worker visa is main route.",
+    "visas": [
+      {"name": "Skilled Worker Permit", "type": "skilled_work", "duration": "1–3 years",
+       "fee": "NOK 6,300", "processing": "2–8 weeks",
+       "requirements": ["Job offer in Norway", "Higher education OR trade certificate", "Salary min NOK 650,000/yr (2024 threshold)", "Housing proof"],
+       "link": "https://www.udi.no/en/want-to-apply/work-immigration/skilled-workers-from-countries-outside-the-eu-eea/"},
+      {"name": "Job Seeker Visa (Skilled Worker)", "type": "job_search", "duration": "6 months",
+       "fee": "NOK 6,300", "processing": "2–4 weeks",
+       "requirements": ["Higher education or vocational", "Sufficient funds NOK 142,000+", "No prior refusals"],
+       "link": "https://www.udi.no/en/want-to-apply/work-immigration/job-seeker-visa-for-skilled-workers/"},
+      {"name": "Student Residence Permit", "type": "study", "duration": "Duration of study",
+       "fee": "NOK 5,900", "processing": "2–4 weeks",
+       "requirements": ["Accepted at Norwegian university", "NOK 142,048+/yr funds (2024)", "Housing"],
+       "link": "https://www.udi.no/en/want-to-apply/studies/"},
+    ],
+    "residency": [
+      {"stage": "Temporary", "name": "Skilled Worker Residence Permit",
+       "min_years": "1–3 years", "key_req": "Job offer, salary above threshold, qualifications",
+       "cost": "NOK 6,300", "link": "https://www.udi.no/en/want-to-apply/work-immigration/"},
+      {"stage": "Permanent (PR)", "name": "Permanent Residence Permit",
+       "min_years": "3 years on skilled worker + total 3 yrs", "key_req": "3 yrs work permit, lived in Norway 3 of last 10 yrs, A2 Norwegian or documented language, no convictions, self-sufficient",
+       "cost": "NOK 5,900", "link": "https://www.udi.no/en/want-to-apply/permanent-residence/"},
+      {"stage": "Citizenship", "name": "Norwegian Citizenship",
+       "min_years": "7 years (3 for EEA, special rules)", "key_req": "7 yrs legal stay (of which 2 yrs recent), A2 Norwegian language, no sentences, age 18+. Dual citizenship allowed since 2020.",
+       "cost": "Free", "link": "https://www.udi.no/en/want-to-apply/citizenship/"},
+    ],
+    "points": None,
+  },
+
+  "Serbia 🇷🇸": {
+    "flag": "🇷🇸",
+    "official": "https://www.mup.gov.rs/wps/portal/en",
+    "points_system": False,
+    "dual_citizenship": True,
+    "eu_member": False,
+    "notes": "Very popular for BY/RU/UA. Visa-free entry 30 days. Easy temporary residence via work/freelance. EU candidate country.",
+    "visas": [
+      {"name": "Visa-Free Stay", "type": "tourist", "duration": "30 days (up to 90 in 180 for some passports)",
+       "fee": "Free", "processing": "Instant",
+       "requirements": ["Check your passport — BY citizens 30 days visa-free", "No registration required first 24h, then must register address"],
+       "link": "https://www.mfa.gov.rs/en/consular-affairs/entry-serbia/visa-free-regimes"},
+      {"name": "Temporary Residence — Employment", "type": "work", "duration": "1 year, renewable",
+       "fee": "~RSD 6,720", "processing": "1–4 weeks",
+       "requirements": ["Employment contract with Serbian company", "Registered address", "Health insurance", "Criminal record clearance"],
+       "link": "https://www.mup.gov.rs/wps/portal/en/residence-and-movement-of-foreigners/"},
+      {"name": "Temporary Residence — Self-Employment / Freelance", "type": "entrepreneur", "duration": "1 year, renewable",
+       "fee": "~RSD 6,720", "processing": "2–4 weeks",
+       "requirements": ["Registered company (d.o.o. ~EUR 100) or entrepreneur (preduzetnik)", "Address in Serbia", "Proof of income/work"],
+       "link": "https://www.apr.gov.rs/eng/home.1026.html"},
+      {"name": "Temporary Residence — Property Owner", "type": "property", "duration": "1 year, renewable",
+       "fee": "~RSD 6,720", "processing": "2–4 weeks",
+       "requirements": ["Own real estate in Serbia", "Proof of income from abroad or savings"],
+       "link": "https://www.mup.gov.rs/wps/portal/en/"},
+    ],
+    "residency": [
+      {"stage": "Temporary", "name": "Privremeni Boravak (Temporary Stay)",
+       "min_years": "1 year (renewable)", "key_req": "Employment contract / company / property / family / study. No income minimum specified but must be self-sufficient.",
+       "cost": "~EUR 60", "link": "https://www.mup.gov.rs/wps/portal/en/residence-and-movement-of-foreigners/"},
+      {"stage": "Permanent (PR)", "name": "Stalni Boravak (Permanent Stay)",
+       "min_years": "5 years continuous temporary residence", "key_req": "5 yrs legal stay, registered address, no criminal record, basic Serbian language (A2)",
+       "cost": "~EUR 60", "link": "https://www.mup.gov.rs/wps/portal/en/"},
+      {"stage": "Citizenship", "name": "Serbian Citizenship by Naturalization",
+       "min_years": "3 years PR (or 8 yrs legal stay)", "key_req": "3 yrs PR, renounce previous citizenship (dual citizenship not automatically recognized), basic Serbian, oath",
+       "cost": "~EUR 20", "link": "https://www.mup.gov.rs/wps/portal/en/"},
+    ],
+    "points": None,
+  },
+
+  "Germany 🇩🇪": {
+    "flag": "🇩🇪",
+    "official": "https://www.bamf.de/EN",
+    "points_system": True,
+    "dual_citizenship": True,
+    "eu_member": True,
+    "notes": "Introduced Chancenkarte (Opportunity Card) in 2024. Dual citizenship now allowed. Strong IT demand.",
+    "visas": [
+      {"name": "EU Blue Card Germany", "type": "skilled_work", "duration": "4 years",
+       "fee": "EUR 100", "processing": "4–8 weeks",
+       "requirements": ["University degree (recognised in Germany)", "Job offer min EUR 45,300 gross/yr (2024) OR EUR 41,042 for shortage occupations (IT, engineering, medicine)", "A1 German or willingness to learn"],
+       "link": "https://www.bamf.de/EN/Themen/MigrationAufenthalt/ZuwandererDrittstaaten/Blaue-Karte-EU/blaue-karte-eu-node.html"},
+      {"name": "Skilled Worker Visa (Fachkräftevisum)", "type": "skilled_work", "duration": "4 years",
+       "fee": "EUR 75", "processing": "4–12 weeks",
+       "requirements": ["Recognised vocational/academic qualification", "Job offer", "Salary per tariff agreement", "German recognition of qualification (or exemption)"],
+       "link": "https://www.bamf.de/EN/Themen/MigrationAufenthalt/ZuwandererDrittstaaten/Arbeit/arbeit-node.html"},
+      {"name": "Chancenkarte (Opportunity Card)", "type": "job_search", "duration": "1 year",
+       "fee": "EUR 100", "processing": "4–8 weeks",
+       "requirements": ["6 out of potential 12 points: degree (4pts), German B2 (3pts), other language (1pt), Germany exp (1pt), age <35 (1pt), verified employment (1pt) + vocational qualification", "Funds EUR 1,027/mo", "A1 German or English"],
+       "link": "https://www.bamf.de/EN/Themen/MigrationAufenthalt/ZuwandererDrittstaaten/Chancenkarte/chancenkarte-node.html"},
+      {"name": "Student Visa", "type": "study", "duration": "2 yrs after graduation (job search)",
+       "fee": "EUR 75", "processing": "4–8 weeks",
+       "requirements": ["University acceptance letter", "EUR 11,208/yr in blocked account (Sperrkonto)", "Health insurance", "Language proof (B2 German or English-taught course)"],
+       "link": "https://www.study-in-germany.de/en/plan-your-studies/start-planning/student-visa.html"},
+    ],
+    "residency": [
+      {"stage": "Temporary", "name": "Aufenthaltserlaubnis (Residence Permit)",
+       "min_years": "1–4 years", "key_req": "EU Blue Card / Skilled Worker / Study",
+       "cost": "EUR 100", "link": "https://www.bamf.de/EN"},
+      {"stage": "Permanent (PR)", "name": "Niederlassungserlaubnis / EU Long-Term Resident",
+       "min_years": "4 yrs EU Blue Card OR 5 yrs general", "key_req": "4 yrs Blue Card: B1 German, pension contributions, secure livelihood. 5 yrs general: A1+ German, pension, clean record",
+       "cost": "EUR 113", "link": "https://www.bamf.de/EN/Themen/MigrationAufenthalt/ZuwandererDrittstaaten/DaueraufenthaltsberechtigungenEU/daueraufenthaltsberechtigungen-eu-node.html"},
+      {"stage": "Citizenship", "name": "German Citizenship (Einbürgerung)",
+       "min_years": "5 years PR (reduced to 3 yrs for special integration)", "key_req": "5 yrs legal stay, B1 German, self-sufficient, no criminal record, civic knowledge test. Dual nationality now allowed (since 2024).",
+       "cost": "EUR 255", "link": "https://www.bamf.de/EN/Themen/Integration/Integrationskurse/integrationskurse-node.html"},
+    ],
+    "points": {
+      "system_name": "Chancenkarte (Opportunity Card) Points",
+      "min_score": 6,
+      "current_cutoff": "6 / 12 points minimum",
+      "calculator_link": "https://www.bamf.de/EN/Themen/MigrationAufenthalt/ZuwandererDrittstaaten/Chancenkarte/chancenkarte-node.html",
+      "criteria": [
+        {"factor": "University degree (German-recognised)", "points": 4},
+        {"factor": "Vocational qualification (German-recognised)", "points": 3},
+        {"factor": "German language B2 or higher", "points": 3},
+        {"factor": "Other language at B2 level", "points": 1},
+        {"factor": "Previous work/study experience in Germany", "points": 1},
+        {"factor": "Age under 35", "points": 1},
+        {"factor": "Verified employment secured", "points": 1},
+        {"factor": "Degree from Top 200 university (QS/THE/Shanghai)", "points": 1},
+      ],
+    },
+  },
+
+  "Portugal 🇵🇹": {
+    "flag": "🇵🇹",
+    "official": "https://aima.gov.pt",
+    "points_system": False,
+    "dual_citizenship": True,
+    "eu_member": True,
+    "notes": "Popular for remote workers. D8 Digital Nomad visa. NHR tax regime (flat 20% for 10 yrs). EU PR after 5 yrs.",
+    "visas": [
+      {"name": "D8 Digital Nomad Visa", "type": "remote_work", "duration": "1 yr (→ 2yr residence)",
+       "fee": "EUR 90", "processing": "2–4 months",
+       "requirements": ["Remote work for non-PT company/clients", "Income ≥ EUR 3,480/mo (4x Portuguese min wage 2024)", "Health insurance", "Criminal record", "Accommodation proof"],
+       "link": "https://aima.gov.pt"},
+      {"name": "D7 Passive Income Visa", "type": "passive_income", "duration": "1 yr (→ 2yr residence)",
+       "fee": "EUR 90", "processing": "2–4 months",
+       "requirements": ["Passive income ≥ EUR 870/mo (min wage)", "Pension, rental, investments, dividends", "Health insurance", "Criminal record"],
+       "link": "https://aima.gov.pt"},
+      {"name": "D2 Entrepreneur / Freelancer Visa", "type": "entrepreneur", "duration": "1 year",
+       "fee": "EUR 90", "processing": "2–4 months",
+       "requirements": ["Business plan or freelance activity in Portugal", "Investment / economic contribution", "Tax registration"],
+       "link": "https://aima.gov.pt"},
+      {"name": "Tech Visa (Vistos Tech)", "type": "skilled_work", "duration": "4 years",
+       "fee": "EUR 90", "processing": "1–2 months",
+       "requirements": ["Job offer from certified Tech company in Portugal", "Bachelor's+ degree or 5 yrs experience"],
+       "link": "https://startupportugal.com/tech-visa/"},
+      {"name": "Golden Visa (ARI) — Investment", "type": "investment", "duration": "2 yrs (renewable)",
+       "fee": "EUR 533 (application)", "processing": "6–12 months",
+       "requirements": ["EUR 500,000+ fund investment (real estate route closed since 2023)", "No minimum stay required", "Clean criminal record"],
+       "link": "https://aima.gov.pt/en/golden-visa"},
+    ],
+    "residency": [
+      {"stage": "Temporary", "name": "Autorização de Residência Temporária",
+       "min_years": "1+2 years", "key_req": "Valid visa (D7/D8/D2/work), address, NIF, NISS, health insurance",
+       "cost": "EUR 533", "link": "https://aima.gov.pt"},
+      {"stage": "Permanent (PR)", "name": "Autorização de Residência Permanente / EU Long-Term",
+       "min_years": "5 years legal residence", "key_req": "5 yrs stay, A2 Portuguese language, no convictions, fiscal compliance",
+       "cost": "EUR 533", "link": "https://aima.gov.pt"},
+      {"stage": "Citizenship", "name": "Portuguese Naturalization",
+       "min_years": "5 years legal residence", "key_req": "5 yrs, A2 Portuguese, clean record, ties to Portugal. Dual citizenship allowed.",
+       "cost": "EUR 250", "link": "https://justica.gov.pt/Servicos/Pedido-de-aquisicao-da-nacionalidade-portuguesa"},
+    ],
+    "points": None,
+  },
+
+}
+
+with TABS[9]:
+    st.subheader("🌐 Visa & Residency Guide")
+    st.caption("Static reference data from official sources. Always verify current rules at official government websites before applying.")
+
+    # ── Country selector
+    country_names = list(VISA_DB.keys())
+    sel_country = st.selectbox(
+        "🌍 Select country:",
+        country_names,
+        key="vg_country_sel",
+    )
+    cdata = VISA_DB[sel_country]
+
+    # ── Country header bar
+    st.markdown(f"""
+<div style="background:linear-gradient(135deg,#0d2137,#1a3a5c);border-radius:12px;padding:18px 24px;margin:8px 0 18px;display:flex;align-items:center;gap:16px;">
+  <span style="font-size:2.8rem">{cdata['flag']}</span>
+  <div>
+    <div style="font-size:1.5rem;font-weight:700;color:#fff">{sel_country}</div>
+    <div style="font-size:.85rem;color:#90caf9;margin-top:3px">{cdata['notes']}</div>
+  </div>
+  <div style="margin-left:auto;display:flex;gap:12px;flex-wrap:wrap;">
+    <span style="background:{'#1b5e20' if cdata['eu_member'] else '#37474f'};color:#fff;padding:3px 10px;border-radius:20px;font-size:.8rem">{'🇪🇺 EU Member' if cdata['eu_member'] else '🌐 Non-EU'}</span>
+    <span style="background:{'#1b5e20' if cdata['dual_citizenship'] else '#b71c1c'};color:#fff;padding:3px 10px;border-radius:20px;font-size:.8rem">{'✅ Dual Citizenship' if cdata['dual_citizenship'] else '❌ No Dual Citizenship'}</span>
+    <span style="background:{'#1565c0' if cdata['points_system'] else '#37474f'};color:#fff;padding:3px 10px;border-radius:20px;font-size:.8rem">{'🧮 Points System' if cdata['points_system'] else '📋 Non-points'}</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── navigation within country
+    subtabs = st.tabs(["🛫 All Visas", "🏠 Residency Pathway", "🛂 Citizenship",
+                       "🧮 Points Calculator" if cdata["points_system"] else "📋 Key Requirements",
+                       "🔗 Official Links"])
+
+    # ══ SUBTAB 0: ALL VISAS ══════════════════════════════════════════════════
+    with subtabs[0]:
+        st.markdown("### Available Visa Types")
+
+        # filter
+        VISA_TYPE_LABELS = {
+            "tourist": "✈️ Tourist/Visitor", "work": "💼 Work",
+            "skilled_work": "🎓 Skilled Worker", "study": "📚 Study",
+            "entrepreneur": "🚀 Entrepreneur/Startup", "investment": "💰 Investment",
+            "job_search": "🔍 Job Search", "remote_work": "💻 Remote/Digital Nomad",
+            "passive_income": "💴 Passive Income", "special": "⭐ Special",
+            "exceptional": "🏆 Exceptional Talent", "property": "🏡 Property Owner",
+        }
+        all_types = list({v["type"] for v in cdata["visas"]})
+        type_labels = [VISA_TYPE_LABELS.get(t, t) for t in all_types]
+        selected_types = st.multiselect(
+            "Filter by type:", type_labels,
+            default=type_labels, key="vg_type_filter"
+        )
+        selected_raw = [all_types[i] for i, lbl in enumerate(type_labels) if lbl in selected_types]
+
+        for visa in cdata["visas"]:
+            if visa["type"] not in selected_raw:
+                continue
+            type_lbl = VISA_TYPE_LABELS.get(visa["type"], visa["type"])
+            badge_color = {
+                "tourist": "#37474f", "work": "#1565c0", "skilled_work": "#1b5e20",
+                "study": "#4a148c", "entrepreneur": "#e65100", "investment": "#827717",
+                "job_search": "#006064", "remote_work": "#0d47a1", "passive_income": "#1a237e",
+                "special": "#880e4f", "exceptional": "#bf360c", "property": "#33691e",
+            }.get(visa["type"], "#333")
+
+            with st.expander(f"**{visa['name']}** — {type_lbl}", expanded=False):
+                c1, c2, c3 = st.columns(3)
+                c1.metric("⏱ Duration", visa["duration"])
+                c2.metric("💳 Fee", visa["fee"])
+                c3.metric("🕐 Processing", visa["processing"])
+
+                st.markdown("**📋 Requirements:**")
+                for req in visa["requirements"]:
+                    st.markdown(f"- {req}")
+
+                st.markdown(
+                    f'<a href="{visa["link"]}" target="_blank" style="'
+                    f'background:{badge_color};color:#fff;padding:6px 14px;'
+                    f'border-radius:6px;text-decoration:none;font-size:.85rem;'
+                    f'display:inline-block;margin-top:6px">🔗 Official Information</a>',
+                    unsafe_allow_html=True
+                )
+
+    # ══ SUBTAB 1: RESIDENCY PATHWAY ══════════════════════════════════════════
+    with subtabs[1]:
+        st.markdown("### 🗺️ Residency → Permanent Residence → Citizenship Pathway")
+
+        stages = cdata["residency"]
+        stage_colors = {"Temporary": "#1565c0", "Permanent (PR)": "#1b5e20",
+                        "Permanent (PR) via 491": "#2e7d32", "Citizenship": "#6a1b9a"}
+
+        # Timeline visualization
+        timeline_html = '<div style="display:flex;align-items:flex-start;gap:0;overflow-x:auto;padding:16px 0 24px;">'
+        for i, stage in enumerate(stages):
+            clr = stage_colors.get(stage["stage"], "#37474f")
+            is_last = i == len(stages) - 1
+            timeline_html += f'''
+<div style="display:flex;flex-direction:column;align-items:center;min-width:160px;flex:1;">
+  <div style="background:{clr};color:#fff;border-radius:50%;width:44px;height:44px;
+              display:flex;align-items:center;justify-content:center;font-size:1.3rem;
+              font-weight:700;flex-shrink:0;z-index:1;">
+    {i+1}
+  </div>
+  <div style="background:{clr}22;border:1px solid {clr};border-radius:8px;padding:10px 12px;
+              margin-top:8px;width:90%;text-align:center;">
+    <div style="color:{clr};font-weight:700;font-size:.85rem">{stage["stage"]}</div>
+    <div style="color:#fff;font-size:.8rem;margin-top:4px">{stage["name"]}</div>
+    <div style="color:#aaa;font-size:.75rem;margin-top:2px">{stage["min_years"]}</div>
+  </div>
+</div>
+'''
+            if not is_last:
+                timeline_html += '<div style="margin-top:20px;color:#555;font-size:1.3rem;flex-shrink:0;">→</div>'
+        timeline_html += '</div>'
+        st.markdown(timeline_html, unsafe_allow_html=True)
+
+        # Detailed cards
+        for stage in stages:
+            clr = stage_colors.get(stage["stage"], "#37474f")
+            st.markdown(f"""
+<div style="border-left:4px solid {clr};background:{clr}15;border-radius:0 8px 8px 0;
+            padding:14px 18px;margin:10px 0;">
+  <div style="font-weight:700;color:{clr};font-size:1rem">{stage['stage']}: {stage['name']}</div>
+  <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+    <div><span style="color:#aaa;font-size:.78rem">⏱ TIMELINE</span>
+         <div style="color:#eee;font-size:.88rem">{stage['min_years']}</div></div>
+    <div><span style="color:#aaa;font-size:.78rem">💳 FEE</span>
+         <div style="color:#eee;font-size:.88rem">{stage['cost']}</div></div>
+  </div>
+  <div style="margin-top:8px;"><span style="color:#aaa;font-size:.78rem">📋 KEY REQUIREMENTS</span>
+       <div style="color:#ddd;font-size:.85rem;margin-top:2px">{stage['key_req']}</div></div>
+  <a href="{stage['link']}" target="_blank" style="display:inline-block;margin-top:10px;
+     background:{clr};color:#fff;padding:4px 12px;border-radius:4px;
+     text-decoration:none;font-size:.8rem;">🔗 Official source</a>
+</div>
+""", unsafe_allow_html=True)
+
+    # ══ SUBTAB 2: CITIZENSHIP ════════════════════════════════════════════════
+    with subtabs[2]:
+        st.markdown("### 🛂 Citizenship & Naturalization Details")
+        citizenship = [s for s in cdata["residency"] if "Citizenship" in s["stage"]]
+        if citizenship:
+            cs = citizenship[0]
+            col1, col2 = st.columns(2)
+            col1.metric("📅 Min. Legal Stay", cs["min_years"])
+            col2.metric("💳 Application Fee", cs["cost"])
+
+            st.markdown(f"""
+<div style="background:#4a148c22;border:1px solid #9c27b0;border-radius:10px;padding:16px 20px;margin:12px 0">
+  <div style="color:#ce93d8;font-weight:700;font-size:.95rem;margin-bottom:10px">📋 Key Requirements</div>
+  <div style="color:#e1bee7;font-size:.88rem;line-height:1.7">{cs['key_req']}</div>
+</div>
+""", unsafe_allow_html=True)
+
+        # Dual citizenship warning
+        if cdata["dual_citizenship"]:
+            st.success("✅ **Dual citizenship is allowed** — you do not need to renounce your current passport.")
+        else:
+            st.error("❌ **Dual citizenship is generally NOT allowed** — you may need to renounce your current passport. Check exceptions with a lawyer.")
+
+        if citizenship:
+            st.markdown(f"[🔗 Official Citizenship Information]({citizenship[0]['link']})")
+
+    # ══ SUBTAB 3: POINTS / KEY REQUIREMENTS ═════════════════════════════════
+    with subtabs[3]:
+        if cdata["points_system"] and cdata.get("points"):
+            pts = cdata["points"]
+            st.markdown(f"### 🧮 {pts['system_name']}")
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Minimum Score", str(pts["min_score"]))
+            col2.metric("Current Cutoff", pts["current_cutoff"].split("(")[0].strip())
+            col3.markdown(f"[📊 Official Calculator]({pts['calculator_link']})")
+
+            st.markdown("#### 📋 Scoring Criteria")
+            pts_data_rows = [
+                {"Factor": c["factor"], "Points": str(c["points"])}
+                for c in pts["criteria"]
+            ]
+            pts_display = pd.DataFrame(pts_data_rows)
+
+            # Interactive calculator
+            st.markdown("#### 🧮 Interactive Points Estimator")
+            st.caption("Check boxes that apply to you to estimate your score:")
+            user_score = 0
+            for i, c in enumerate(pts["criteria"], start=1): 
+                pts_val = c["points"]
+                # handle ranges like "5 / 15"
+                if isinstance(pts_val, str) and "/" in str(pts_val):
+                    pts_num = int(str(pts_val).split("/")[0].strip())
+                    label = f"✅ {c['factor']} — **{pts_val} pts**"
+                elif isinstance(pts_val, str) and "+" in str(pts_val):
+                    pts_num = int(str(pts_val).replace("+","").split()[0])
+                    label = f"✅ {c['factor']} — **{pts_val} pts**"
+                else:
+                    try:
+                        pts_num = int(str(pts_val))
+                    except Exception:
+                        pts_num = 0
+                    label = f"✅ {c['factor']} — **{pts_val} pts**"
+                
+                # 2. МЕНЯЕМ KEY (добавляем {i} и убираем срез [:20])
+                if st.checkbox(label, key=f"pts_{sel_country}_{i}"): 
+                    user_score += pts_num
+
+            # Score result
+            min_s = pts["min_score"]
+            pct_of_min = user_score / min_s * 100 if min_s > 0 else 0
+            bar_clr = "#27ae60" if user_score >= min_s else ("#f39c12" if pct_of_min >= 70 else "#e74c3c")
+            st.markdown(f"""
+<div style="background:#0d2137;border-radius:10px;padding:16px 20px;margin:12px 0;text-align:center;">
+  <div style="font-size:2.2rem;font-weight:800;color:{bar_clr}">{user_score} pts</div>
+  <div style="color:#aaa;font-size:.9rem">Your estimated score</div>
+  <div style="background:#1a3a5c;border-radius:8px;height:12px;margin:12px 0;overflow:hidden;">
+    <div style="background:{bar_clr};height:100%;width:{min(pct_of_min,100):.0f}%;
+                border-radius:8px;transition:width .3s;"></div>
+  </div>
+  <div style="color:#ddd;font-size:.85rem">
+    Minimum required: <b style="color:{bar_clr}">{min_s}</b> pts
+    {'— ✅ <b style="color:#27ae60">You qualify!</b>' if user_score >= min_s
+      else f'— ❌ Need <b style="color:#e74c3c">{min_s - user_score} more points</b>'}
+  </div>
+</div>
+""", unsafe_allow_html=True)
+            st.dataframe(pts_display, use_container_width=True, hide_index=True)
+
+        else:
+            st.markdown("### 📋 Key Requirements Summary")
+            st.info(f"{sel_country} does not use a points-based immigration system. Eligibility is determined by individual circumstances, job offers, and documentation.")
+            # Show residency summary table
+            rdata = []
+            for stage in cdata["residency"]:
+                rdata.append({
+                    "Stage": stage["stage"],
+                    "Name": stage["name"],
+                    "Min. Years": stage["min_years"],
+                    "Cost": stage["cost"],
+                })
+            st.dataframe(pd.DataFrame(rdata), use_container_width=True, hide_index=True)
+
+    # ══ SUBTAB 4: OFFICIAL LINKS ═════════════════════════════════════════════
+    with subtabs[4]:
+        st.markdown("### 🔗 Official Sources & Useful Links")
+
+        st.markdown(f"""
+<a href="{cdata['official']}" target="_blank"
+   style="display:flex;align-items:center;gap:12px;background:#1a3a5c;border:1px solid #2a5a8c;
+          border-radius:10px;padding:16px 20px;text-decoration:none;margin-bottom:12px;">
+  <span style="font-size:2rem">{cdata['flag']}</span>
+  <div>
+    <div style="color:#4fc3f7;font-weight:700;font-size:1rem">Official Immigration Portal</div>
+    <div style="color:#aaa;font-size:.82rem">{cdata['official']}</div>
+  </div>
+  <span style="margin-left:auto;color:#4fc3f7">→</span>
+</a>
+""", unsafe_allow_html=True)
+
+        # visa-specific links
+        st.markdown("**All visa types — direct links:**")
+        link_cols = st.columns(2)
+        for i, visa in enumerate(cdata["visas"]):
+            type_lbl = VISA_TYPE_LABELS.get(visa["type"], visa["type"])
+            link_cols[i % 2].markdown(f"[{type_lbl}: {visa['name']}]({visa['link']})")
+
+        # citizenship link
+        cit_links = [s for s in cdata["residency"] if "Citizenship" in s["stage"]]
+        if cit_links:
+            st.markdown(f"\n**Citizenship:** [{cit_links[0]['name']}]({cit_links[0]['link']})")
+
+        if cdata.get("points") and cdata["points"].get("calculator_link"):
+            st.markdown(f"\n**Points Calculator:** [Official Tool]({cdata['points']['calculator_link']})")
+
+        # general tips
+        st.markdown("---")
+        st.markdown("### 💡 General Tips")
+        tips = [
+            "Always check the **official government portal** for the most up-to-date fee and requirement information — rules change frequently.",
+            "**Language tests** (IELTS, DELF, Goethe) should be booked 2–3 months in advance as seats fill quickly.",
+            "For **qualification recognition** in EU countries, use ENIC-NARIC network: [enic-naric.net](https://www.enic-naric.net)",
+            "Keep **apostilled copies** of all documents — most countries require official translation + apostille.",
+            "**Tax residency** changes when you move — consult a tax advisor about potential double taxation agreements.",
+            "For EU countries, PR gives you the right to **EU Long-Term Resident** status — mobility within the EU.",
+        ]
+        for tip in tips:
+            st.markdown(f"- {tip}")
